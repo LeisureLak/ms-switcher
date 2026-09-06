@@ -3,7 +3,8 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-/// 一条灵敏度切换规则：当 VID:PID 匹配的设备插入时，把指针速度设为 `speed`。
+/// 一条灵敏度切换规则：当 VID:PID 匹配的设备插入时，把指针速度设为 `speed`，
+/// 若指定了 `wheel` 也把滚轮速度（行/齿）设为该值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     #[serde(default)]
@@ -12,6 +13,9 @@ pub struct Rule {
     pub pid: String,
     #[serde(default = "default_speed")]
     pub speed: u32,
+    /// 插入时应用的滚轮速度（1-100 行/齿）；None = 规则不改滚轮。
+    #[serde(default)]
+    pub wheel: Option<u32>,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -34,19 +38,28 @@ impl Config {
     }
 
     /// 设置（或更新）一条规则；返回该规则最终的速度。
-    pub fn set_rule(&mut self, vid: &str, pid: &str, speed: u32, note: Option<String>) {
+    pub fn set_rule(
+        &mut self,
+        vid: &str,
+        pid: &str,
+        speed: u32,
+        wheel: Option<u32>,
+        note: Option<String>,
+    ) {
         if let Some(r) = self
             .rules
             .iter_mut()
             .find(|r| r.vid.eq_ignore_ascii_case(vid) && r.pid.eq_ignore_ascii_case(pid))
         {
             r.speed = speed;
+            r.wheel = wheel;
             r.note = note;
         } else {
             self.rules.push(Rule {
                 vid: vid.to_ascii_uppercase(),
                 pid: pid.to_ascii_uppercase(),
                 speed,
+                wheel,
                 note,
             });
         }

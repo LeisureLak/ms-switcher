@@ -1,26 +1,27 @@
 #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+//! MouseSpeedSwitcher 入口：现代原生 Win32 架构。
+//!
+//! - 隐藏宿主窗口 + 阻塞式 `GetMessageW` 事件循环（空闲 0 轮询、0 重绘）。
+//! - 托盘：`Shell_NotifyIconW`；设备监听：`RegisterDeviceNotificationW` +
+//!   `WM_DEVICECHANGE`（350ms 防抖）；系统速度变化：`WM_SETTINGCHANGE`。
+//! - 单线程状态所有权：`HostState` 由 `Box` 唯一持有，窗口过程只借用
+//!   （见 win32/host.rs 所有权模型与踩坑规避）。
 
-use mouse_speed_switcher::{app, config, devices, state::AppState, tray};
+use mouse_speed_switcher::win32::{self, host, tray};
+use mouse_speed_switcher::{config, menu_model, state::AppState, speed};
 use windows::core::w;
-use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::Foundation::GetLastError;
-
-/// 极简日志：MSS_DEBUG=1 时把 log/warn/error 打到 stderr（诊断 viewport 等内部问题用）。
-struct DebugLogger;
-static LOG_INIT: std::sync::Once = std::sync::Once::new();
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 
 fn main() {
-    LOG_INIT.call_once(|| {
-        if std::env::var("MSS_DEBUG").is_ok() {
-            let _ = log::set_boxed_logger(Box::new(DebugLogger));
-            log::set_max_level(log::LevelFilter::Debug);
-        }
-    });
+    // Per-Monitor V2：必须先于任何 HWND 创建
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
 
     // 单实例：已存在则静默退出
     match unsafe { CreateMutexW(None, true, w!("Local\\MouseSpeedSwitcher_Singleton")) } {
@@ -28,119 +29,52 @@ fn main() {
             if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
                 return;
             }
-            // HANDLE 是 Copy 且无 Drop，绑定保留到 main 结束即可
-            let _ = m;
+            let _ = m; // HANDLE 保留到 main 结束
         }
         Err(_) => return,
     }
 
-    // 初始化：读配置、枚举已插入设备并应用规则
-    let app_state = Arc::new(Mutex::new(Some(AppState::new(config::load()))));
-    let dirty = Arc::new(AtomicBool::new(false));
-    let (tip_tx, tip_rx) = std::sync::mpsc::channel::<String>();
+    // 读配置、枚举已插入设备并应用规则
+    let app = AppState::new(config::load());
 
-    // 托盘图标
-    let (cur, rule) = {
-        let guard = app_state.lock().unwrap();
-        (
-            speed_get(),
-            guard
-                .as_ref()
-                .and_then(|s| s.effective_rule())
-                .map(|(d, sp)| (d.name.clone(), sp)),
-        )
-    };
-    let tip = app::tip_text(cur, rule.as_ref().map(|(n, s)| (n.as_str(), *s)));
-    let tray = match tray::TrayHandle::new(&tip) {
-        Some(t) => t,
-        None => return,
+    // 宿主状态：Box 唯一持有（窗口过程只借用，见 host.rs 所有权模型）
+    let mut state = host::HostState::new(app);
+    state.hwnd = match host::create_host_window(&mut state) {
+        Ok(h) => h,
+        Err(_) => return,
     };
 
-    // 托盘事件线程：点击（左/右键抬起）→ 置位 TRAY_CLICK
-    std::thread::spawn(|| {
-        let rx = tray_icon::TrayIconEvent::receiver();
-        while let Ok(ev) = rx.recv() {
-            if let tray_icon::TrayIconEvent::Click {
-                button: tray_icon::MouseButton::Left | tray_icon::MouseButton::Right,
-                button_state: tray_icon::MouseButtonState::Up,
-                ..
-            } = ev
-            {
-                app::TRAY_CLICK.store(true, Ordering::Relaxed);
-            }
-        }
-    });
+    // 鼠标接口设备通知（RAII）
+    state.dev_notify = win32::device_notify::MouseDevNotify::new(state.hwnd);
 
-    // 设备轮询线程：替代原 WM_DEVICECHANGE 去抖 + 30s 兜底轮询，
-    // 直接周期性枚举设备并应用差异，同时同步托盘 tooltip。
-    {
-        let app_state = app_state.clone();
-        let dirty = dirty.clone();
-        let tip_tx = tip_tx.clone();
-        std::thread::spawn(move || {
-            let mut last_ids: Vec<String> = Vec::new();
-            loop {
-                std::thread::sleep(Duration::from_secs(2));
-                let mice = devices::enumerate_mice();
-                let ids: Vec<String> =
-                    mice.iter().map(|d| d.instance_id.clone()).collect();
-                {
-                    let mut guard = app_state.lock().unwrap();
-                    if let Some(st) = guard.as_mut() {
-                        st.apply_diff(&mice);
-                    }
-                }
-                if ids != last_ids {
-                    last_ids = ids;
-                    dirty.store(true, Ordering::Relaxed);
-                }
-                let (cur, rule) = {
-                    let guard = app_state.lock().unwrap();
-                    (
-                        speed_get(),
-                        guard
-                            .as_ref()
-                            .and_then(|s| s.effective_rule())
-                            .map(|(d, sp)| (d.name.clone(), sp)),
-                    )
-                };
-                let _ = tip_tx.send(app::tip_text(
-                    cur,
-                    rule.as_ref().map(|(n, s)| (n.as_str(), *s)),
-                ));
-            }
-        });
-    }
-
-    let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_transparent(true)
-            .with_active(false)
-            .with_taskbar(false)
-            .with_inner_size([1.0, 1.0])
-            .with_position([-32000.0, -32000.0]),
-        ..Default::default()
-    };
-    let r = eframe::run_native(
-        "MouseSpeedSwitcher",
-        opts,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, app_state, tray, dirty, tip_rx)))),
+    // 初始 tooltip 与托盘图标
+    let rule = menu_model::effective_name(&state.app);
+    let tip = menu_model::tip_text(
+        speed::get(),
+        speed::get_wheel(),
+        rule.as_ref().map(|(n, s)| (n.as_str(), *s)),
     );
-    let _ = r;
+    state.tray = tray::Tray::new(state.hwnd, &tip);
+    if state.tray.is_none() {
+        return;
+    }
+
+    // MSS_DEBUG_MENU=1：启动即弹出菜单（自动化冒烟测试用）
+    if std::env::var("MSS_DEBUG_MENU").is_ok() {
+        debug_open_menu(&state);
+    }
+
+    let _code = host::message_loop();
+    // state（Box）在此 drop：托盘 Drop 内部 NIM_DELETE + DestroyIcon，
+    // 设备通知 Drop 反注册
 }
 
-fn speed_get() -> u32 {
-    mouse_speed_switcher::speed::get()
-}
-
-impl log::Log for DebugLogger {
-    fn enabled(&self, meta: &log::Metadata) -> bool {
-        meta.level() <= log::Level::Warn
+/// MSS_DEBUG_MENU=1：模拟一次托盘左键抬起（自动化冒烟测试用）。
+fn debug_open_menu(state: &host::HostState) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_LBUTTONUP};
+    let lp = (WM_LBUTTONUP as isize & 0xFFFF) as isize;
+    unsafe {
+        let _ = PostMessageW(Some(state.hwnd), tray::WM_APP_TRAY, WPARAM(1), LPARAM(lp));
     }
-    fn log(&self, record: &log::Record) {
-        eprintln!("[log-{}] {}", record.level(), record.args());
-    }
-    fn flush(&self) {}
 }

@@ -1,0 +1,510 @@
+//! 设备子菜单窗口：VID/PID 信息 + 速度滑块（本地预览）+「设为规则」按钮 +
+//! 保存/删除/重新应用规则。
+//!
+//! - `WS_POPUP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`：纯交互小窗不抢焦点，
+//!   主菜单保持前台，失焦关闭逻辑不受影响（踩坑 三-4 的结构性规避）。
+//! - owner = 主菜单：主菜单销毁时级联销毁，无孤儿窗口。
+//! - 跨窗口悬停保持：主菜单收不到指针时靠 `model.sub_pointer_inside`
+//!   保持子菜单打开（与 egui 版语义一致，逻辑在纯模型 update_hover）。
+//! - 子菜单滑块是本地预览值（`model.sub_slider`）：拖动只改预览，
+//!   点「设为规则」按钮才把该值写入设备规则并重新应用——不直接碰系统速度。
+//! - 关闭一律走「先摘除再销毁」或异步 `WM_APP_CLOSE_SUBMENU`（处理时
+//!   重新检查悬停状态），杜绝同步销毁级联（踩坑 三-1/三-3）。
+
+#![allow(unsafe_op_in_unsafe_fn)]
+
+use std::ffi::c_void;
+
+use windows::core::w;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush, DeleteDC,
+    DeleteObject, EndPaint, FillRect, FrameRect, InvalidateRect, SelectObject, SetBkMode,
+    SRCCOPY, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{TBM_SETPOS, TBM_SETRANGE, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASS, WM_MOUSELEAVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::WindowsAndMessaging as win;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
+    PostMessageW, SendMessageW, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW, HMENU, SW_SHOWNA,
+    WM_ERASEBKGND, WM_HSCROLL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_PAINT, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+};
+
+use crate::menu_model::{
+    sub_action_top, sub_btn_at, sub_btn_rect, sub_height, sub_ptr_label_top, sub_row_at,
+    sub_slider_rect, sub_wheel_label_top, sub_wheel_rect, DevRow, Hover, MenuAction, MENU_W, PAD,
+    SUB_INFO_TOP, SUB_ROW_H, SUB_W,
+};
+
+use super::host::{HostState, WM_APP_CLOSE_SUBMENU};
+use super::menu::{
+    apply_dwm, current_pal, dip_from_lp, dpi_scale, draw_text, draw_text_center, register_class,
+    trackbar_proc, SUB_CLASS,
+};
+
+/// TBM_GETPOS 未包含在 windows crate 绑定中，值为 WM_USER（与 menu.rs 一致）。
+const TBM_GETPOS: u32 = win::WM_USER;
+
+/// 按模型子菜单状态开/关/切换子菜单窗口（主菜单 WM_MOUSEMOVE/LEAVE 驱动）。
+pub fn sync(state: &mut HostState, menu_hwnd: HWND) {
+    let want = state.model.sub_hover;
+    match (want, state.sub) {
+        (_, Some(_)) if state.sub_dev == want.map(|(i, _)| i) => {}
+        (Some((idx, top)), cur) => {
+            if cur.is_some() {
+                close(state);
+            }
+            if let Err(e) = open(state, menu_hwnd, idx, top) {
+                if state.debug {
+                    eprintln!("[mss-debug] open submenu failed: {e}");
+                }
+            }
+        }
+        (None, Some(_)) => close(state),
+        _ => {}
+    }
+}
+
+/// 打开设备子菜单：紧贴主菜单右缘、顶对齐悬停行；不抢焦点。
+fn open(state: &mut HostState, menu_hwnd: HWND, idx: usize, row_top: f32) -> Result<HWND, windows::core::Error> {
+    let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None) }?.into();
+    register_class(hinstance);
+
+    let mut mr = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(menu_hwnd, &mut mr);
+    }
+    let s = dpi_scale(menu_hwnd);
+    let sub_w = (SUB_W * s).round() as i32;
+    let sub_h = (sub_height() * s).round() as i32;
+
+    // 位置：默认紧贴主菜单右缘；右侧出工作区则改为左缘展开；垂直方向
+    // 顶对齐悬停行并夹取到工作区内（多显示器按菜单所在显示器计算）。
+    let (work, _menu_mon) = unsafe {
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        let mon = MonitorFromWindow(menu_hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO::default();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let _ = GetMonitorInfoW(mon, &mut mi);
+        (mi, mon)
+    };
+    let x_right = mr.left + (MENU_W * s).round() as i32;
+    let x = if x_right + sub_w > work.rcWork.right && mr.left - sub_w >= work.rcWork.left {
+        mr.left - sub_w // 右侧放不下：贴主菜单左缘
+    } else {
+        x_right
+    };
+    let y = (mr.top + (row_top * s).round() as i32)
+        .clamp(work.rcWork.top, (work.rcWork.bottom - sub_h).max(work.rcWork.top));
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            SUB_CLASS,
+            w!("MSS SubMenu"),
+            WS_POPUP,
+            x,
+            y,
+            sub_w,
+            sub_h,
+            Some(menu_hwnd), // owner：主菜单销毁时级联销毁
+            None,
+            Some(hinstance.into()),
+            Some(state.hwnd.0.cast()),
+        )?
+    };
+
+    // 滑块初值：有规则用规则值，无规则用当前系统值（纯本地预览）
+    let (init_sp, init_wh) = match state.model.devs.get(idx) {
+        Some(d) => (
+            d.rule_speed.unwrap_or_else(crate::speed::get),
+            d.rule_wheel.unwrap_or_else(crate::speed::get_wheel),
+        ),
+        None => (crate::speed::get(), crate::speed::get_wheel()),
+    };
+    state.model.sub_slider = Some(init_sp);
+    state.model.sub_wheel = Some(init_wh);
+
+    // 指针滑块（1–20）
+    let (sl, st, sr, sb) = sub_slider_rect();
+    let tb = unsafe {
+        CreateWindowExW(
+            win::WINDOW_EX_STYLE(0),
+            TRACKBAR_CLASS,
+            w!(""),
+            WS_CHILD | WS_VISIBLE | win::WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            ((sl * s).round()) as i32,
+            ((st * s).round()) as i32,
+            (((sr - sl) * s).round()) as i32,
+            (((sb - st) * s).round()) as i32,
+            Some(hwnd),
+            Some(HMENU(1 as *mut c_void)),
+            Some(hinstance.into()),
+            None,
+        )?
+    };
+    // 滚轮滑块（1–100）
+    let (wl, wt, wr, wb) = sub_wheel_rect();
+    let tb_wh = unsafe {
+        CreateWindowExW(
+            win::WINDOW_EX_STYLE(0),
+            TRACKBAR_CLASS,
+            w!(""),
+            WS_CHILD | WS_VISIBLE | win::WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            ((wl * s).round()) as i32,
+            ((wt * s).round()) as i32,
+            (((wr - wl) * s).round()) as i32,
+            (((wb - wt) * s).round()) as i32,
+            Some(hwnd),
+            Some(HMENU(2 as *mut c_void)),
+            Some(hinstance.into()),
+            None,
+        )?
+    };
+    unsafe {
+        SendMessageW(tb, TBM_SETRANGE, Some(WPARAM(0)), Some(LPARAM(makelong(1, 20) as isize)));
+        SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(init_sp as isize)));
+        SendMessageW(
+            tb_wh,
+            TBM_SETRANGE,
+            Some(WPARAM(0)),
+            Some(LPARAM(makelong(1, 100) as isize)),
+        );
+        SendMessageW(tb_wh, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(init_wh as isize)));
+        // 子类 id 3/4：Esc 转发 + 子控件 leave 通知（光标从滑块直接移出窗口的路径）
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+            tb,
+            Some(trackbar_proc),
+            3,
+            state.hwnd.0 as usize,
+        );
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+            tb_wh,
+            Some(trackbar_proc),
+            4,
+            state.hwnd.0 as usize,
+        );
+    }
+    state.sub_trackbar = Some(tb);
+    state.sub_wheel_trackbar = Some(tb_wh);
+
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNA); // 不激活，主菜单保持前台
+    }
+    apply_dwm(hwnd, &current_pal(state));
+    state.sub = Some(hwnd);
+    state.sub_dev = Some(idx);
+    state.sub_hover_row = None;
+    Ok(hwnd)
+}
+
+fn makelong(lo: i32, hi: i32) -> u32 {
+    (lo as u16 as u32) | ((hi as u16 as u32) << 16)
+}
+
+/// 光标是否位于窗口矩形内。子菜单含滑块子控件：指针移到子控件上时
+/// 父窗口收不到 WM_MOUSEMOVE 只会收到 WM_MOUSELEAVE，靠本函数区分
+/// 「移到滑块上」与「真正离开窗口」。
+pub fn cursor_inside_window(hwnd: HWND) -> bool {
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = win::GetCursorPos(&mut pt);
+        let mut wr = RECT::default();
+        if win::GetWindowRect(hwnd, &mut wr).is_ok() {
+            pt.x >= wr.left && pt.x < wr.right && pt.y >= wr.top && pt.y < wr.bottom
+        } else {
+            false
+        }
+    }
+}
+
+/// 关闭子菜单（先摘除再销毁；主菜单保持打开）。
+pub fn close(state: &mut HostState) {
+    if let Some(h) = state.sub.take() {
+        state.sub_dev = None;
+        state.sub_hover_row = None;
+        state.sub_pressed = None;
+        state.sub_trackbar = None;
+        state.sub_wheel_trackbar = None;
+        state.model.sub_slider = None;
+        state.model.sub_wheel = None;
+        state.model.sub_pointer_inside = false;
+        unsafe {
+            let _ = win::DestroyWindow(h);
+        }
+    }
+}
+
+/// 子菜单窗口过程。GWLP_USERDATA 存宿主 HWND，两跳反查状态
+/// （与主菜单一致；WM_DESTROY 不反向访问宿主状态）。
+pub unsafe extern "system" fn sub_wndproc(
+    hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCCREATE {
+        let cs = lp.0 as *const CREATESTRUCTW;
+        SetWindowLongPtrW(hwnd, win::GWLP_USERDATA, (*cs).lpCreateParams as isize);
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    let host = HWND(GetWindowLongPtrW(hwnd, win::GWLP_USERDATA) as *mut c_void);
+    if host.is_invalid() {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    let ptr = GetWindowLongPtrW(host, win::GWLP_USERDATA) as *mut HostState;
+    if ptr.is_null() {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    match msg {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            paint(ptr, hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let state = &mut *ptr;
+            state.model.sub_pointer_inside = true;
+            let (x, y) = dip_from_lp(hwnd, lp);
+            // 悬停槽位：0..2 = 操作行，3 = 「设为规则」按钮
+            let slot = sub_row_at(y).or_else(|| sub_btn_at(x, y).then_some(3));
+            if slot != state.sub_hover_row {
+                state.sub_hover_row = slot;
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let state = &mut *ptr;
+            state.sub_pressed = None;
+            // 指针可能只是移到了子控件（滑块）上：光标仍在窗口矩形内，
+            // 保持打开。不在此处重挂 TrackMouseEvent（重挂会在子控件上
+            // 来回触发 leave）；后续由滑块子类的 leave 通知或父窗口
+            // WM_MOUSEMOVE（重新登记跟踪）接管。
+            if cursor_inside_window(hwnd) {
+                return LRESULT(0);
+            }
+            state.model.sub_pointer_inside = false;
+            state.sub_hover_row = None;
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            // 指针离开子菜单：若不在主菜单设备行上，请求异步关闭。
+            // 处理时会重新检查悬停状态（移入主菜单设备行时硬件消息
+            // 先于本投递消息处理，不会误关）。
+            if !matches!(state.hover, Some(Hover::Device(_))) {
+                state.model.sub_hover = None;
+                let _ = PostMessageW(Some(host), WM_APP_CLOSE_SUBMENU, WPARAM(0), LPARAM(0));
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            // 按下反馈：只在可用操作上登记按压态
+            let state = &mut *ptr;
+            let (x, y) = dip_from_lp(hwnd, lp);
+            let slot = sub_row_at(y).or_else(|| sub_btn_at(x, y).then_some(3));
+            let enabled = match (state.sub_dev, slot) {
+                (Some(dev), Some(s)) => state
+                    .model
+                    .devs
+                    .get(dev)
+                    .map(|d: &DevRow| if s == 3 { d.can_rule() } else { d.sub_actions()[s].1 })
+                    .unwrap_or(false),
+                _ => false,
+            };
+            state.sub_pressed = if enabled { slot } else { None };
+            if state.sub_pressed.is_some() {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(0)
+        }
+        WM_HSCROLL => {
+            // 子菜单滑块：所有通知都只更新本地预览，绝不直接改系统速度
+            let state = &mut *ptr;
+            if state.sub_trackbar.map(|h| h.0 as isize) == Some(lp.0) {
+                let pos = unsafe {
+                    SendMessageW(state.sub_trackbar.unwrap(), TBM_GETPOS, Some(WPARAM(0)), Some(LPARAM(0))).0
+                } as i32;
+                state.model.preview_sub_slider(pos);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            } else if state.sub_wheel_trackbar.map(|h| h.0 as isize) == Some(lp.0) {
+                let pos = unsafe {
+                    SendMessageW(state.sub_wheel_trackbar.unwrap(), TBM_GETPOS, Some(WPARAM(0)), Some(LPARAM(0))).0
+                } as i32;
+                state.model.preview_sub_wheel(pos);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            // 松手且未移出按下的槽位才触发（按下反馈语义）
+            let state = &mut *ptr;
+            let (x, y) = dip_from_lp(hwnd, lp);
+            let slot = sub_row_at(y).or_else(|| sub_btn_at(x, y).then_some(3));
+            let pressed = state.sub_pressed.take();
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            if pressed.is_some() && pressed == slot {
+                if let (Some(dev), Some(s)) = (state.sub_dev, slot) {
+                    if s == 3 {
+                        // 「设为规则」：以滑块预览值写入该设备规则（指针 + 滚轮）
+                        if let (Some(sp), Some(wh)) =
+                            (state.model.sub_slider, state.model.sub_wheel)
+                        {
+                            let can = state
+                                .model
+                                .devs
+                                .get(dev)
+                                .map(|d: &DevRow| d.can_rule())
+                                .unwrap_or(false);
+                            if can {
+                                super::menu::dispatch(
+                                    ptr,
+                                    vec![MenuAction::SetRuleWithSpeed(dev, sp, wh)],
+                                );
+                            }
+                        }
+                    } else {
+                        let enabled = state
+                            .model
+                            .devs
+                            .get(dev)
+                            .map(|d: &DevRow| d.sub_actions()[s].1)
+                            .unwrap_or(false);
+                        if enabled {
+                            let action = match s {
+                                0 => MenuAction::SetRule(dev),
+                                1 => MenuAction::DelRule(dev),
+                                _ => MenuAction::Reapply(dev),
+                            };
+                            super::menu::dispatch(ptr, vec![action]);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+fn paint(ptr: *mut HostState, hwnd: HWND) {
+    unsafe {
+        let state = &mut *ptr;
+        let mut ps = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let w = rc.right.max(1);
+        let h = rc.bottom.max(1);
+
+        let mem = CreateCompatibleDC(Some(hdc));
+        let bmp = CreateCompatibleBitmap(hdc, w, h);
+        let old_bmp = SelectObject(mem, bmp.into());
+        let s = dpi_scale(hwnd);
+        let pal = current_pal(state);
+
+        // 背景 + 边框
+        let full = RECT { left: 0, top: 0, right: w, bottom: h };
+        let bg_brush = CreateSolidBrush(pal.bg);
+        FillRect(mem, &full, bg_brush);
+        let _ = DeleteObject(bg_brush.into());
+        let border_brush = CreateSolidBrush(pal.border);
+        FrameRect(mem, &full, border_brush);
+        let _ = DeleteObject(border_brush.into());
+
+        let old_font = SelectObject(mem, super::menu::ui_font(state).into());
+        SetBkMode(mem, TRANSPARENT);
+
+        if let Some(dev) = state.sub_dev {
+            if let Some(d) = state.model.devs.get(dev) {
+                // ── 信息行 ──
+                draw_text(mem, &d.sub_info(), PAD, SUB_INFO_TOP + SUB_ROW_H / 2.0, s, pal.gray);
+
+                // ── 指针标签行（拖动中实时显示当前档位）──
+                let sp = state.model.sub_slider.unwrap_or(10);
+                draw_text(
+                    mem,
+                    &format!("指针速度: {sp}"),
+                    PAD,
+                    sub_ptr_label_top() + SUB_ROW_H / 2.0,
+                    s,
+                    pal.text,
+                );
+
+                // ── 滚轮标签行 ──
+                let wh = state.model.sub_wheel.unwrap_or(3);
+                draw_text(
+                    mem,
+                    &format!("滚轮速度: {wh}"),
+                    PAD,
+                    sub_wheel_label_top() + SUB_ROW_H / 2.0,
+                    s,
+                    pal.text,
+                );
+
+                // ── 「设为规则」按钮（整行）──
+                let btn_hovered = d.can_rule() && state.sub_hover_row == Some(3);
+                let btn_pressed = d.can_rule() && state.sub_pressed == Some(3);
+                let (bl, bt, br, bb) = sub_btn_rect();
+                let btn = RECT {
+                    left: ((bl + 0.5) * s).round() as i32,
+                    top: ((bt + 0.5) * s).round() as i32,
+                    right: ((br - 0.5) * s).round() as i32,
+                    bottom: ((bb - 0.5) * s).round() as i32,
+                };
+                if btn_pressed {
+                    FillRect(mem, &btn, CreateSolidBrush(pal.btn_pressed));
+                } else if btn_hovered {
+                    FillRect(mem, &btn, CreateSolidBrush(pal.btn_hover));
+                }
+                let pen = CreatePen(PS_SOLID, 1, pal.border);
+                let old_pen = SelectObject(mem, pen.into());
+                let _ = windows::Win32::Graphics::Gdi::Rectangle(mem, btn.left, btn.top, btn.right, btn.bottom);
+                SelectObject(mem, old_pen);
+                let _ = DeleteObject(pen.into());
+                let btn_color = if d.can_rule() { pal.text } else { pal.gray };
+                draw_text_center(mem, "设为规则", bl, bt, br, bb, s, btn_color);
+
+                // ── 操作行 ──
+                for (slot, (label, enabled)) in d.sub_actions().into_iter().enumerate() {
+                    let top = sub_action_top(slot);
+                    let hovered = enabled && state.sub_hover_row == Some(slot);
+                    let pressed = enabled && state.sub_pressed == Some(slot);
+                    let color = if hovered || pressed {
+                        pal.hl_text
+                    } else if !enabled {
+                        pal.gray
+                    } else {
+                        pal.text
+                    };
+                    if hovered || pressed {
+                        let fill = if pressed { pal.row_pressed } else { pal.highlight };
+                        let rr = RECT {
+                            left: (1.0 * s).round() as i32,
+                            top: (top * s).round() as i32,
+                            right: (((SUB_W - 1.0) * s).round() as i32).min(w),
+                            bottom: ((top + SUB_ROW_H) * s).round() as i32,
+                        };
+                        FillRect(mem, &rr, CreateSolidBrush(fill));
+                    }
+                    draw_text(mem, label, PAD, top + SUB_ROW_H / 2.0, s, color);
+                }
+            }
+        }
+
+        SelectObject(mem, old_font);
+        let _ = windows::Win32::Graphics::Gdi::BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+        SelectObject(mem, old_bmp);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
