@@ -37,6 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::device_notify::MouseDevNotify;
+use super::focus;
 use super::menu;
 use super::scroll_hook::{self, WM_APP_SCROLL_CHANGED, WM_APP_SCROLL_INJECT};
 use super::submenu;
@@ -499,7 +500,10 @@ fn open_menu(state: &mut HostState) {
     }
 }
 
-/// 关闭菜单：先从宿主状态摘除，再销毁窗口；把焦点还给通知区域。
+/// 关闭菜单：先把前台焦点归还给用户窗口（`focus::restore`，必须赶在
+/// 本进程仍持有前台时移交），再从宿主状态摘除并销毁窗口；找不到归还
+/// 目标才退回 `NIM_SETFOCUS`（把焦点交还通知区域）——否则会表现为
+/// 「焦点锁在托盘图标上」。
 /// 注意菜单的 WM_DESTROY 不得反向访问宿主状态（见模块注释）。
 pub fn close_menu(state: &mut HostState) {
     if state.menu_opening {
@@ -527,20 +531,27 @@ pub fn close_menu(state: &mut HostState) {
         state.sub = None; // 子菜单是菜单的 ownee，随级联销毁
         state.sub_dev = None;
         state.sub_hover_row = None;
+        // 前台焦点归还须在 DestroyWindow 之前：此时前台多半还在菜单手里
+        // （或落在任务栏），仍持有前台/可附加到前台线程才有权移交。
+        // 若当前前台已是别人的正常窗口（点击菜单外关闭），restore 内不插手。
+        let restored = focus::restore();
         unsafe {
             let r = DestroyWindow(h);
             if state.debug {
                 eprintln!("[mss-debug] DestroyWindow(menu) ok={}", r.is_ok());
             }
         }
-        let mut nid = NOTIFYICONDATAW {
-            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: state.hwnd,
-            uID: tray::uid(),
-            ..Default::default()
-        };
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_SETFOCUS, &mut nid);
+        if !restored {
+            // 找不到可归还的用户窗口：维持旧行为，把焦点交还通知区域
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: state.hwnd,
+                uID: tray::uid(),
+                ..Default::default()
+            };
+            unsafe {
+                let _ = Shell_NotifyIconW(NIM_SETFOCUS, &mut nid);
+            }
         }
     }
     state.menu_ever_active.store(false, Ordering::Relaxed);

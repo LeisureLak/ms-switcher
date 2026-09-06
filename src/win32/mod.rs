@@ -4,6 +4,7 @@
 //! 映射为模型更新并执行模型动作；FFI 资源所有权集中在本层管理。
 
 pub mod device_notify;
+pub mod focus;
 pub mod host;
 pub mod menu;
 pub mod scroll_hook;

@@ -22,6 +22,8 @@ pub const BOTTOM_PAD: f32 = 6.0;
 pub const PAD: f32 = 8.0;
 /// 勾选标记列宽。
 pub const CHECK_W: f32 = 18.0;
+/// 规则图标列宽（小齿轮）。
+pub const RULE_ICON_W: f32 = 18.0;
 
 // ── 纯数据与格式化 ─────────────────────────────────────
 
@@ -84,15 +86,11 @@ pub struct DevRow {
 }
 
 impl DevRow {
-    /// 设备行显示文本（与旧版一致）。
+    /// 设备行显示文本（规则速度不再此处显示，改由绘制层的小齿轮图标表示）。
     pub fn row_text(&self) -> String {
         let vid = self.vid.as_deref().unwrap_or("----");
         let pid = self.pid.as_deref().unwrap_or("----");
-        let mut s = format!("{}  [{}:{}]", self.name, vid, pid);
-        if let Some(sp) = self.rule_speed {
-            s.push_str(&format!("  · 规则 {sp}"));
-        }
-        s
+        format!("{}  [{}:{}]", self.name, vid, pid)
     }
 
     /// 是否可配置规则（有 VID/PID）。
@@ -605,7 +603,7 @@ mod tests {
     #[test]
     fn device_row_text() {
         let d = dev("轨迹球", Some("046D"), Some("C52B"), Some(4));
-        assert_eq!(d.row_text(), "轨迹球  [046D:C52B]  · 规则 4");
+        assert_eq!(d.row_text(), "轨迹球  [046D:C52B]");
         assert!(d.can_rule());
 
         let blind = dev("盲设备", None, None, None);

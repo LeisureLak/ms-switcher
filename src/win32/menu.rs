@@ -53,7 +53,7 @@ use crate::menu_model::{
     self, autostart_row_top, device_row_top, eff_row_top, exit_row_top, hover_at, menu_height,
     reset_btn_rect, scroll_mode_top, scroll_sens_label_top, scroll_sens_slider_top,
     scroll_trigger_top, wheel_label_top, wheel_slider_top, Hover, MenuAction, CHECK_W, INFO_ROW_H,
-    MENU_W, PAD, ROW_H, SEP_H, SLIDER_H, SUB_W, TITLE_H, TOP_PAD,
+    MENU_W, PAD, ROW_H, RULE_ICON_W, SEP_H, SLIDER_H, SUB_W, TITLE_H, TOP_PAD,
 };
 use crate::scroll::{SCROLL_PX_MAX, SCROLL_PX_MIN};
 
@@ -1131,7 +1131,10 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
             if d.is_effective && d.rule_speed.is_some() {
                 draw_check(hdc, top + ROW_H / 2.0, s, color);
             }
-            draw_text(hdc, &d.row_text(), PAD + CHECK_W, top + ROW_H / 2.0, s, color);
+            if d.rule_speed.is_some() {
+                draw_gear(hdc, top + ROW_H / 2.0, s, color);
+            }
+            draw_text(hdc, &d.row_text(), PAD + CHECK_W + RULE_ICON_W, top + ROW_H / 2.0, s, color);
         }
 
         let auto_top = autostart_row_top(n);
@@ -1222,6 +1225,46 @@ fn draw_check(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
         let _ = MoveToEx(hdc, (cx - u).round() as i32, cy.round() as i32, None);
         let _ = LineTo(hdc, (cx - u / 3.0).round() as i32, (cy + u).round() as i32);
         let _ = LineTo(hdc, (cx + u).round() as i32, (cy - u).round() as i32);
+        SelectObject(hdc, old);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// 小齿轮图标（表示该设备已配置规则），绘制在对勾右侧的规则图标列。
+fn draw_gear(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
+    unsafe {
+        let cx = (PAD + CHECK_W + RULE_ICON_W / 2.0) * s;
+        let cy = cy_dip * s;
+        let r_inner = 3.5 * s;
+        let r_outer = 5.5 * s;
+        let n_teeth = 8;
+        let two_pi = 2.0 * std::f32::consts::PI;
+        let step = two_pi / n_teeth as f32;
+        let half = step / 2.0;
+        let offset = -std::f32::consts::PI / 2.0;
+
+        let mut pts = [POINT { x: 0, y: 0 }; 16];
+        for i in 0..n_teeth {
+            let a_v = offset + i as f32 * step - half;
+            pts[2 * i] = POINT {
+                x: (cx + r_inner * a_v.cos()).round() as i32,
+                y: (cy + r_inner * a_v.sin()).round() as i32,
+            };
+            let a_t = offset + i as f32 * step;
+            pts[2 * i + 1] = POINT {
+                x: (cx + r_outer * a_t.cos()).round() as i32,
+                y: (cy + r_outer * a_t.sin()).round() as i32,
+            };
+        }
+
+        let pen = CreatePen(PS_SOLID, (2.0 * s).round().max(1.0) as i32, color);
+        let old = SelectObject(hdc, pen.into());
+        let _ = MoveToEx(hdc, pts[0].x, pts[0].y, None);
+        for i in 1..pts.len() {
+            let _ = LineTo(hdc, pts[i].x, pts[i].y);
+        }
+        // 闭合轮廓
+        let _ = LineTo(hdc, pts[0].x, pts[0].y);
         SelectObject(hdc, old);
         let _ = DeleteObject(pen.into());
     }
