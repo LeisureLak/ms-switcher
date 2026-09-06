@@ -21,7 +21,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
 use windows::core::w;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::Graphics::Gdi::{DeleteObject, InvalidateRect};
 use windows::Win32::UI::Controls::TBM_SETPOS;
@@ -29,17 +29,16 @@ use windows::Win32::UI::Shell::{NIM_SETFOCUS, Shell_NotifyIconW, NOTIFYICONDATAW
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetAncestor, GetClassNameW, GetMessageW, GetWindowLongPtrW, KillTimer, LoadCursorW,
-    MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WindowFromPoint, CREATESTRUCTW, GA_ROOT, HHOOK, IDC_ARROW, MSG,
-    WINDOW_EX_STYLE, WH_MOUSE_LL, WM_CLOSE, WM_DESTROY, WM_LBUTTONDOWN, WM_NCCREATE,
-    WM_RBUTTONDOWN, WNDCLASSEXW,
+    GetMessageW, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, MSLLHOOKSTRUCT,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SendMessageW,
+    SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    CREATESTRUCTW, HHOOK, IDC_ARROW, MSG, WINDOW_EX_STYLE, WH_MOUSE_LL, WM_CLOSE,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_NCCREATE, WM_RBUTTONDOWN, WNDCLASSEXW,
 };
 
 use super::device_notify::MouseDevNotify;
 use super::menu;
-use super::scroll_hook::{self, WM_APP_SCROLL_CHANGED};
+use super::scroll_hook::{self, WM_APP_SCROLL_CHANGED, WM_APP_SCROLL_INJECT};
 use super::submenu;
 use super::tray::{self, Tray};
 use crate::menu_model::{self, Hover, MenuModel};
@@ -266,6 +265,12 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             }
             LRESULT(0)
         }
+        WM_APP_SCROLL_INJECT => {
+            // 滚轮注入冲刷：钩子回调只累积+投递，SendInput 只在普通处理
+            // 上下文里执行（钩子回调内注入会自锁 win32k，见踩坑 四-16）
+            scroll_hook::flush_pending_wheel();
+            LRESULT(0)
+        }
         WM_APP_SCROLL_CHANGED => {
             // 触发键录入结束（钩子投递；wParam 1=已录入(lp=键码) 0=取消）
             if wp.0 == 1 {
@@ -402,17 +407,16 @@ pub fn remove_mouse_close_hook() {
     }
 }
 
-/// 命中窗口的根窗口是否为本程序的弹出菜单/子菜单（按窗口类名判断）。
-pub(crate) fn is_mss_popup(root: HWND) -> bool {
-    let mut buf = [0u16; 16];
-    let n = unsafe { GetClassNameW(root, &mut buf) };
-    if n <= 0 {
+/// 光标点是否落在本线程窗口 `h` 的矩形内。
+/// 只读本线程自有窗口的矩形（`GetWindowRect` 不发消息），可在钩子回调内
+/// 安全使用——不要用 `WindowFromPoint`：它会向命中窗口的宿主线程同步发送
+/// `WM_NCHITTEST`，对方线程一旦挂起会把本线程一起拖死（踩坑 四-16 同类）。
+fn point_in_window(h: HWND, pt: POINT) -> bool {
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(h, &mut r) }.is_err() {
         return false;
     }
-    let name = &buf[..n as usize];
-    unsafe {
-        name == w!("MSS_Menu").as_wide() || name == w!("MSS_SubMenu").as_wide()
-    }
+    pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -424,14 +428,19 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                 let host = HOOK_HOST.load(Ordering::Acquire);
                 if host != 0 {
                 let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
-                let pt = POINT { x: info.pt.x, y: info.pt.y };
-                let hit = WindowFromPoint(pt);
-                let root = if hit.is_invalid() {
-                    HWND::default()
-                } else {
-                    GetAncestor(hit, GA_ROOT)
+                // 「点在弹出层内」只查自己的菜单/子菜单窗口矩形（本线程自有
+                // 窗口，无跨线程消息）。差异：若第三方置顶窗恰好压在菜单矩形上，
+                // 点击不再判为外部点击——菜单保持打开，可接受。
+                let ptr = GetWindowLongPtrW(HWND(host as *mut c_void), win::GWLP_USERDATA)
+                    as *const HostState;
+                let inside = !ptr.is_null() && {
+                    let s = &*ptr;
+                    [s.menu, s.sub]
+                        .into_iter()
+                        .flatten()
+                        .any(|h| point_in_window(h, info.pt))
                 };
-                if !root.is_invalid() && !is_mss_popup(root) {
+                if !inside {
                     let _ = PostMessageW(
                         Some(HWND(host as *mut c_void)),
                         WM_APP_CLOSE_MENU,

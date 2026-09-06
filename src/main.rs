@@ -23,15 +23,18 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    // 单实例：已存在则静默退出
-    match unsafe { CreateMutexW(None, true, w!("Local\\MouseSpeedSwitcher_Singleton")) } {
-        Ok(m) => {
-            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-                return;
+    // 单实例：已存在则静默退出（MSS_NO_SINGLETON=1 调试期可跳过，
+    // 例如旧实例卡成僵尸仍占着互斥体时验证新构建）
+    if std::env::var("MSS_NO_SINGLETON").is_err() {
+        match unsafe { CreateMutexW(None, true, w!("Local\\MouseSpeedSwitcher_Singleton")) } {
+            Ok(m) => {
+                if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                    return;
+                }
+                let _ = m; // HANDLE 保留到 main 结束
             }
-            let _ = m; // HANDLE 保留到 main 结束
+            Err(_) => return,
         }
-        Err(_) => return,
     }
 
     // 读配置、枚举已插入设备并应用规则

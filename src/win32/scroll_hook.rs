@@ -7,16 +7,19 @@
 //! - **触发键录入**：菜单点「触发键」后进入录入态，下一个落在**菜单之外**的
 //!   鼠标键成为触发键（该次按下被吞掉）；点菜单内任意处取消录入。
 //!
-//! 纪律（踩坑 三-1 / 性能基线）：
+//! 纪律（踩坑 三-1 / 性能基线 / 四-16）：
 //! - 钩子回调与消息循环同线程（系统经消息泵回调），经 `HOST_PTR` 直接借用
-//!   `HostState`，无需锁；回调内只做内存运算与 SendInput，绝不碰文件/菜单。
+//!   `HostState`，无需锁；回调内只做内存运算与 PostMessage 投递，绝不碰
+//!   文件/菜单，也绝不直接 SendInput——注入事件要走同一条低级钩子分发
+//!   路径，回调内注入会让线程自锁在 win32k（进程卡死且杀不掉，见踩坑
+//!   四-16）；真正的注入在消息循环普通处理上下文里做（`flush_pending_wheel`）。
 //! - 注入事件带 LLMHF_INJECTED 标记，回调一律放行（不能自己吞自己）。
 //! - 钩子回调超时会被系统静默摘除（LowLevelHooksTimeout），保持回调极短。
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -35,6 +38,13 @@ use crate::scroll::TriggerBtn;
 /// 录入完成/取消通知（应用私有消息）。wParam = 1 表示已录入新触发键（结果在
 /// 静态量里，宿主经 `take_capture_result` 取），0 表示取消。
 pub const WM_APP_SCROLL_CHANGED: u32 = win::WM_USER + 5;
+/// 冲刷积攒的滚轮注入量（应用私有消息）。
+///
+/// SendInput 绝不能出现在 LL 钩子回调内：注入的输入要走同一条低级钩子
+/// 分发路径，回调内注入会让线程自锁在 win32k——进程卡死且无法结束
+/// （踩坑 四-16）。因此回调只累积并投递本消息，由宿主在普通消息处理
+/// 上下文里统一注入（`flush_pending_wheel`）。
+pub const WM_APP_SCROLL_INJECT: u32 = win::WM_USER + 6;
 
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static HOST_PTR: AtomicIsize = AtomicIsize::new(0);
@@ -42,6 +52,10 @@ static HOST_PTR: AtomicIsize = AtomicIsize::new(0);
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 /// 录入态。
 static CAPTURING: AtomicBool = AtomicBool::new(false);
+/// 已累积、尚未注入的滚轮量（WHEEL_DELTA=120 的倍数）。
+static PENDING_WHEEL: AtomicI32 = AtomicI32::new(0);
+/// 队列里是否已有未处理的 `WM_APP_SCROLL_INJECT`（一次泵周期只投一条，防投递风暴）。
+static INJECT_POSTED: AtomicBool = AtomicBool::new(false);
 
 /// 安装/卸载钩子（功能开关变化时调用）。
 pub fn set_enabled(state: &mut HostState, on: bool) {
@@ -75,6 +89,8 @@ fn install(state: &mut HostState) {
 
 fn uninstall() {
     CAPTURING.store(false, Ordering::Relaxed);
+    PENDING_WHEEL.store(0, Ordering::Relaxed);
+    INJECT_POSTED.store(false, Ordering::Release);
     let h = HOOK_HANDLE.swap(0, Ordering::AcqRel);
     HOST_PTR.store(0, Ordering::Release);
     if h != 0 {
@@ -152,6 +168,40 @@ fn trigger_from(msg: u32, mouse_data: u32) -> Option<TriggerBtn> {
         },
         _ => return None,
     })
+}
+
+/// 钩子回调内调用：累积滚轮量并保证队列里有一条冲刷消息。
+/// 只做内存运算 + PostMessage，绝不在这里 SendInput（见 `WM_APP_SCROLL_INJECT`）。
+fn queue_wheel(state: &HostState, units: i32) {
+    PENDING_WHEEL.fetch_add(units, Ordering::Relaxed);
+    if !INJECT_POSTED.swap(true, Ordering::AcqRel) {
+        let posted = unsafe {
+            PostMessageW(
+                Some(state.hwnd),
+                WM_APP_SCROLL_INJECT,
+                WPARAM(0),
+                LPARAM(0),
+            )
+            .is_ok()
+        };
+        if !posted {
+            // 投递失败（罕见，如队列满）：复位标志，让下一次累积能重新投递
+            INJECT_POSTED.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// 宿主收到 `WM_APP_SCROLL_INJECT` 后调用：把积攒量一次性 SendInput。
+/// 运行在普通消息处理上下文（不在钩子回调内），SendInput 在这里是安全的。
+pub fn flush_pending_wheel() {
+    // 先清标志再取量：期间钩子新累积的量会看到标志已清、重新投递，
+    // 不会丢（最坏情况多投一条空消息）。
+    INJECT_POSTED.store(false, Ordering::Release);
+    let units = PENDING_WHEEL.swap(0, Ordering::AcqRel);
+    if units != 0 {
+        // 滚轮 delta 是 i16 量级，限幅防多次累积溢出
+        inject_wheel(units.clamp(-32760, 32760));
+    }
 }
 
 /// 注入一齿（或数齿）纵向滚轮。
@@ -247,7 +297,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                                     if state.debug {
                                         eprintln!("[mss-debug] scroll inject {units}");
                                     }
-                                    inject_wheel(units);
+                                    queue_wheel(state, units);
                                 }
                             }
                             // 移动被吞：指针不动
