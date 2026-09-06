@@ -98,4 +98,4 @@ cargo test
 
 ## AI Agent
 
-迭代本项目的技能：`.devin/skills/iterate/SKILL.md`。
+迭代本项目的技能：`.agents/skills/iterate/SKILL.md`（各 agent 工具通用）。
