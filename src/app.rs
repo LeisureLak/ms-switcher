@@ -776,6 +776,11 @@ fn draw_check(painter: &egui::Painter, row: Rect, pad: f32, color: Color32) {
 
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // MSS_NO_FONT=1：跳过中文字体加载（内存构成诊断用）
+    if std::env::var("MSS_NO_FONT").is_ok() {
+        ctx.set_fonts(fonts);
+        return;
+    }
     // 中文字形：运行时加载系统微软雅黑（失败则退回内置字体，仅显示方框不崩溃）
     for path in ["C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\msyh.ttf"] {
         if let Ok(bytes) = std::fs::read(path) {
