@@ -1,9 +1,14 @@
-//! 滚轮模式低级鼠标钩子（WH_MOUSE_LL，常驻）。
+//! 滚轮模式低级鼠标钩子（WH_MOUSE_LL，常驻）+ Raw Input 位移源。
 //!
 //! 行为（仅在本程序菜单未打开时生效，菜单打开期间整体放行）：
-//! - **滚轮模式**：按住配置的触发键（默认侧键1）期间，WM_MOUSEMOVE 被吞掉，
-//!   Y 位移经 [`crate::scroll::WheelAccum`] 攒齿后 `SendInput` 注入
-//!   `MOUSEEVENTF_WHEEL`；触发键抬起恢复原样。
+//! - **滚轮模式**：按住配置的触发键（默认侧键1）期间，钩子吞掉
+//!   WM_MOUSEMOVE 冻结指针；Y 位移改由 Raw Input 提供（宿主窗口收
+//!   `WM_INPUT` 读 `RAWMOUSE.lLastY`），经 [`crate::scroll::WheelAccum`]
+//!   攒齿后 `SendInput` 注入 `MOUSEEVENTF_WHEEL`；触发键抬起恢复原样。
+//!   不能用钩子的 `pt` 求位移：`pt` 是**光标位置**而非原始位移，吞掉移动
+//!   把光标冻结后，系统会生成把位置拉回真实光标的补偿移动——在回调里
+//!   表现为反向位移，注入反向滚轮 = 滚动回弹（踩坑 四-17）。Raw Input
+//!   由 HID 栈直接产生，与钩子吞移动互不影响，无弹道/钳制/补偿事件。
 //! - **触发键录入**：菜单点「触发键」后进入录入态，下一个落在**菜单之外**的
 //!   鼠标键成为触发键（该次按下被吞掉）；点菜单内任意处取消录入。
 //!
@@ -21,9 +26,13 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+};
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -56,12 +65,17 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 static PENDING_WHEEL: AtomicI32 = AtomicI32::new(0);
 /// 队列里是否已有未处理的 `WM_APP_SCROLL_INJECT`（一次泵周期只投一条，防投递风暴）。
 static INJECT_POSTED: AtomicBool = AtomicBool::new(false);
+/// Raw Input 鼠标源是否已注册（`RIDEV_INPUTSINK` → 宿主窗口后台收 `WM_INPUT`）。
+static RAW_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// 安装/卸载钩子（功能开关变化时调用）。
+/// 安装/卸载钩子与 Raw Input 源（功能开关变化时调用）。
 pub fn set_enabled(state: &mut HostState, on: bool) {
     if on {
         install(state);
+        register_raw_input(state);
     } else {
+        // 关功能时复位激活态：钩子卸了就不会再见到触发键抬起
+        state.scroll.active = false;
         uninstall();
     }
 }
@@ -91,12 +105,98 @@ fn uninstall() {
     CAPTURING.store(false, Ordering::Relaxed);
     PENDING_WHEEL.store(0, Ordering::Relaxed);
     INJECT_POSTED.store(false, Ordering::Release);
+    unregister_raw_input();
     let h = HOOK_HANDLE.swap(0, Ordering::AcqRel);
     HOST_PTR.store(0, Ordering::Release);
     if h != 0 {
         unsafe {
             let _ = UnhookWindowsHookEx(HHOOK(h as *mut c_void));
         }
+    }
+}
+
+/// 注册 Raw Input 鼠标源（Generic Desktop / Mouse），WM_INPUT 投递到宿主窗口。
+/// 只在功能开启时注册：常驻注册会让每次物理移动都唤醒消息泵，白白耗电。
+fn register_raw_input(state: &HostState) {
+    if RAW_REGISTERED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let dev = RAWINPUTDEVICE {
+        usUsagePage: 0x01, // HID Generic Desktop
+        usUsage: 0x02,     // Mouse
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: state.hwnd,
+    };
+    let ok = unsafe {
+        RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32).is_ok()
+    };
+    if !ok {
+        // 注册失败（罕见）：回退标志，滚轮模式退化为「只冻指针无滚动」，
+        // 不致命；下次开关可重试
+        RAW_REGISTERED.store(false, Ordering::Release);
+        if state.debug {
+            eprintln!("[mss-debug] raw input register failed");
+        }
+    }
+}
+
+fn unregister_raw_input() {
+    if !RAW_REGISTERED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let dev = RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02,
+        dwFlags: RIDEV_REMOVE, // hwndTarget 必须为 NULL
+        hwndTarget: HWND::default(),
+    };
+    unsafe {
+        let _ = RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+    }
+}
+
+/// 宿主收到 `WM_INPUT` 时调用：滚轮模式激活期间取 Raw Input 相对 Y 位移攒齿。
+/// 运行在普通消息处理上下文；与钩子回调一样只累积 + 投递，注入统一走
+/// `flush_pending_wheel`。
+pub fn on_raw_input(state: &mut HostState, lp: LPARAM) {
+    if !state.scroll.active
+        || !state.app.cfg.scroll.enabled
+        || MENU_OPEN.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let mut raw = RAWINPUT::default();
+    let mut cb = std::mem::size_of::<RAWINPUT>() as u32;
+    let got = unsafe {
+        GetRawInputData(
+            HRAWINPUT(lp.0 as *mut c_void),
+            RID_INPUT,
+            Some((&mut raw as *mut RAWINPUT).cast()),
+            &mut cb,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        )
+    };
+    if got == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE.0 {
+        return;
+    }
+    let m = unsafe { raw.data.mouse };
+    // 绝对坐标设备（手写板等）的 lLastY 是位置不是位移，跳过；
+    // 鼠标/轨迹球都是相对位移
+    if m.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || m.lLastY == 0 {
+        return;
+    }
+    let px = state
+        .app
+        .cfg
+        .scroll
+        .px_per_notch
+        .clamp(crate::scroll::SCROLL_PX_MIN, crate::scroll::SCROLL_PX_MAX) as f32;
+    let units = state.scroll.accum.feed(m.lLastY as f32, px);
+    if units != 0 {
+        if state.debug {
+            eprintln!("[mss-debug] scroll inject {units}");
+        }
+        queue_wheel(state, units);
     }
 }
 
@@ -264,12 +364,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                 {
                     let t = state.app.cfg.scroll.trigger;
                     if matches_down(msg, info.mouseData, t) {
-                        // 进入滚轮模式：吞掉触发键按下，记录基准 Y
+                        // 进入滚轮模式：吞掉触发键按下。位移源是 Raw Input，
+                        // 这里不再记基准点（见模块头注释 / 踩坑 四-17）
                         state.scroll.accum.reset();
-                        state.scroll.last_y = info.pt.y;
                         state.scroll.active = true;
                         if state.debug {
-                            eprintln!("[mss-debug] scroll mode ON (dy accum per {} px)", state.app.cfg.scroll.px_per_notch);
+                            eprintln!("[mss-debug] scroll mode ON (raw input, {} px/notch)", state.app.cfg.scroll.px_per_notch);
                         }
                         return LRESULT(1);
                     }
@@ -282,25 +382,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                             return LRESULT(1);
                         }
                         if msg == WM_MOUSEMOVE {
-                            let dy = info.pt.y - state.scroll.last_y;
-                            state.scroll.last_y = info.pt.y;
-                            if dy != 0 {
-                                let px = state
-                                    .app
-                                    .cfg
-                                    .scroll
-                                    .px_per_notch
-                                    .clamp(crate::scroll::SCROLL_PX_MIN, crate::scroll::SCROLL_PX_MAX)
-                                    as f32;
-                                let units = state.scroll.accum.feed(dy as f32, px);
-                                if units != 0 {
-                                    if state.debug {
-                                        eprintln!("[mss-debug] scroll inject {units}");
-                                    }
-                                    queue_wheel(state, units);
-                                }
-                            }
-                            // 移动被吞：指针不动
+                            // 移动被吞：指针冻结。这里的 pt 不可用作位移
+                            // （冻结光标后系统会补偿/钳制，见踩坑 四-17），
+                            // Y 位移由 WM_INPUT → on_raw_input 提供。
                             return LRESULT(1);
                         }
                         // 其余按键/滚轮消息照常放行

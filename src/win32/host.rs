@@ -271,6 +271,12 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             scroll_hook::flush_pending_wheel();
             LRESULT(0)
         }
+        win::WM_INPUT => {
+            // Raw Input：滚轮模式的位移源（钩子吞掉移动后 pt 不可靠，
+            // 见踩坑 四-17）。处理完仍交 DefWindowProc 供系统清理。
+            scroll_hook::on_raw_input(state, lp);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_APP_SCROLL_CHANGED => {
             // 触发键录入结束（钩子投递；wParam 1=已录入(lp=键码) 0=取消）
             if wp.0 == 1 {
@@ -478,7 +484,11 @@ fn open_menu(state: &mut HostState) {
             state.pressed = None;
             state.sub_pressed = None;
             install_mouse_close_hook(state.hwnd);
-            // 菜单打开期间滚轮模式放行（侧键恢复正常语义）
+            // 菜单打开期间滚轮模式放行（侧键恢复正常语义）。
+            // 若打开瞬间触发键恰好按着（如按着侧键点托盘），直接复位激活态——
+            // 菜单打开期间钩子整体放行，再也见不到那次抬起，不复位会永久卡在
+            // 滚轮模式里吞掉所有移动。
+            state.scroll.active = false;
             scroll_hook::set_menu_open(true);
         }
         Err(e) => {

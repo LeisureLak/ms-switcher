@@ -6,11 +6,9 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::c_void;
-
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, SetWindowsHookExW,
+    CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, SetWindowsHookExW,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_MOUSEMOVE,
 };
 

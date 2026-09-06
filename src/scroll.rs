@@ -74,7 +74,8 @@ pub struct WheelAccum {
 }
 
 impl WheelAccum {
-    /// 喂入一段位移。`dy_px` 为屏幕坐标 Y 增量（向下为正），
+    /// 喂入一段位移。`dy_px` 为纵向位移（向下为正；Raw Input 相对位移
+    /// 与屏幕坐标同向，灵敏度滑块以像素/齿标定，量级一致），
     /// 返回应注入的滚轮量（120 的整数倍，方向：上滚为正）。
     pub fn feed(&mut self, dy_px: f32, px_per_notch: f32) -> i32 {
         if !(px_per_notch > 0.0) {
@@ -103,10 +104,8 @@ impl WheelAccum {
 pub struct ScrollEngine {
     /// 是否处于「按住触发键」的滚轮模式中。
     pub active: bool,
-    /// 像素 → 齿累积器。
+    /// 位移 → 齿累积器（位移源是 Raw Input 相对位移，见 win32/scroll_hook.rs）。
     pub accum: WheelAccum,
-    /// 上一个 WM_MOUSEMOVE 的屏幕 Y（求位移用）。
-    pub last_y: i32,
 }
 
 #[cfg(test)]

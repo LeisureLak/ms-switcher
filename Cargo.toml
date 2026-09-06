@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_HumanInterfaceDevice", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_Graphics_Dwm", "Win32_UI_Accessibility"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_HumanInterfaceDevice", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_Graphics_Dwm", "Win32_UI_Accessibility", "Win32_UI_Input"] }
 
 [profile.release]
 opt-level = "z"
