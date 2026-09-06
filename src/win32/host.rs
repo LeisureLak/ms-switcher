@@ -39,6 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::device_notify::MouseDevNotify;
 use super::menu;
+use super::scroll_hook::{self, WM_APP_SCROLL_CHANGED};
 use super::submenu;
 use super::tray::{self, Tray};
 use crate::menu_model::{self, Hover, MenuModel};
@@ -50,6 +51,7 @@ pub const WM_APP_CLOSE_MENU: u32 = win::WM_USER + 2;
 pub const WM_APP_CLOSE_SUBMENU: u32 = win::WM_USER + 3;
 /// 子菜单滑块（子控件）的 leave 通知：光标可能从滑块直接移出子菜单窗口。
 pub const WM_APP_SUB_LEFT: u32 = win::WM_USER + 4;
+// WM_USER + 5 = 滚轮模式触发键录入完成/取消（scroll_hook::WM_APP_SCROLL_CHANGED）
 
 const HOST_CLASS: windows::core::PCWSTR = w!("MSS_Host");
 
@@ -87,6 +89,8 @@ pub struct HostState {
     pub trackbar: Option<HWND>,
     /// 菜单内的滚轮速度 Trackbar 滑块子控件。
     pub wheel_trackbar: Option<HWND>,
+    /// 菜单内的滚轮灵敏度 Trackbar 滑块子控件（像素/齿）。
+    pub scroll_trackbar: Option<HWND>,
     /// 设备子菜单内的指针速度 Trackbar（本地预览，不直接改系统）。
     pub sub_trackbar: Option<HWND>,
     /// 设备子菜单内的滚轮速度 Trackbar（本地预览）。
@@ -107,6 +111,8 @@ pub struct HostState {
     pub sub_pressed: Option<usize>,
     /// 鼠标接口设备通知句柄（RAII）。
     pub dev_notify: Option<MouseDevNotify>,
+    /// 滚轮模式运行时状态（钩子回调同线程借用）。
+    pub scroll: crate::scroll::ScrollEngine,
     /// 系统「应用深色模式」与高对比度（WM_SETTINGCHANGE 时刷新）。
     pub theme_dark: bool,
     pub hc: bool,
@@ -116,16 +122,29 @@ pub struct HostState {
 impl HostState {
     /// `app` 需已加载配置、枚举设备并应用过规则（见 native 入口）。
     pub fn new(app: AppState) -> Box<HostState> {
+        let (s_on, s_trig, s_px) = (
+            app.cfg.scroll.enabled,
+            app.cfg.scroll.trigger,
+            app.cfg.scroll.px_per_notch,
+        );
         Box::new(HostState {
             hwnd: HWND::default(),
             app,
-            model: MenuModel::new(speed::get(), speed::get_wheel(), crate::autostart::is_enabled()),
+            model: MenuModel::new(
+                speed::get(),
+                speed::get_wheel(),
+                crate::autostart::is_enabled(),
+                s_on,
+                s_trig,
+                s_px,
+            ),
             tray: None,
             menu: None,
             menu_ever_active: std::sync::atomic::AtomicBool::new(false),
             menu_opening: false,
             trackbar: None,
             wheel_trackbar: None,
+            scroll_trackbar: None,
             sub_trackbar: None,
             sub_wheel_trackbar: None,
             font: windows::Win32::Graphics::Gdi::HFONT::default(),
@@ -136,6 +155,7 @@ impl HostState {
             pressed: None,
             sub_pressed: None,
             dev_notify: None,
+            scroll: crate::scroll::ScrollEngine::default(),
             theme_dark: menu::system_dark(),
             hc: menu::high_contrast(),
             debug: std::env::var("MSS_DEBUG_MENU").is_ok(),
@@ -244,6 +264,22 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             if state.model.sub_hover.is_none() {
                 submenu::close(state);
             }
+            LRESULT(0)
+        }
+        WM_APP_SCROLL_CHANGED => {
+            // 触发键录入结束（钩子投递；wParam 1=已录入(lp=键码) 0=取消）
+            if wp.0 == 1 {
+                if let Some(t) = crate::scroll::TriggerBtn::from_code(lp.0 as u32) {
+                    state.app.cfg.scroll.trigger = t;
+                    let _ = crate::config::save(&state.app.cfg);
+                    state.model.scroll_trigger = t;
+                    if state.debug {
+                        eprintln!("[mss-debug] scroll trigger captured: {:?}", t);
+                    }
+                }
+            }
+            state.model.capturing = scroll_hook::is_capturing();
+            invalidate_menu(state);
             LRESULT(0)
         }
         WM_APP_SUB_LEFT => {
@@ -367,7 +403,7 @@ pub fn remove_mouse_close_hook() {
 }
 
 /// 命中窗口的根窗口是否为本程序的弹出菜单/子菜单（按窗口类名判断）。
-fn is_mss_popup(root: HWND) -> bool {
+pub(crate) fn is_mss_popup(root: HWND) -> bool {
     let mut buf = [0u16; 16];
     let n = unsafe { GetClassNameW(root, &mut buf) };
     if n <= 0 {
@@ -383,8 +419,10 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
     if code >= 0 {
         let msg = wp.0 as u32;
         if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
-            let host = HOOK_HOST.load(Ordering::Acquire);
-            if host != 0 {
+            // 触发键录入期间菜单外按键是「录入」，不关菜单
+            if !super::scroll_hook::is_capturing() {
+                let host = HOOK_HOST.load(Ordering::Acquire);
+                if host != 0 {
                 let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
                 let pt = POINT { x: info.pt.x, y: info.pt.y };
                 let hit = WindowFromPoint(pt);
@@ -400,6 +438,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                         WPARAM(0),
                         LPARAM(0),
                     );
+                }
                 }
             }
         }
@@ -430,6 +469,8 @@ fn open_menu(state: &mut HostState) {
             state.pressed = None;
             state.sub_pressed = None;
             install_mouse_close_hook(state.hwnd);
+            // 菜单打开期间滚轮模式放行（侧键恢复正常语义）
+            scroll_hook::set_menu_open(true);
         }
         Err(e) => {
             if state.debug {
@@ -446,11 +487,15 @@ pub fn close_menu(state: &mut HostState) {
         return; // 创建调用栈内不销毁（踩坑 三-3）
     }
     remove_mouse_close_hook();
+    // 菜单关闭：滚轮模式恢复（录入态随 set_menu_open(false) 一并取消）
+    scroll_hook::set_menu_open(false);
+    state.model.capturing = false;
     state.pressed = None;
     state.sub_pressed = None;
     if let Some(h) = state.menu.take() {
         state.trackbar = None;
         state.wheel_trackbar = None;
+        state.scroll_trackbar = None;
         state.sub_trackbar = None;
         state.sub_wheel_trackbar = None;
         state.hover = None;

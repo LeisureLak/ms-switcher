@@ -467,10 +467,22 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
                 }
                 let pen = CreatePen(PS_SOLID, 1, pal.border);
                 let old_pen = SelectObject(mem, pen.into());
+                // 同 menu.rs：NULL_BRUSH 防止 Rectangle 用白刷盖掉悬停底色
+                let old_brush = SelectObject(
+                    mem,
+                    windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::NULL_BRUSH).into(),
+                );
                 let _ = windows::Win32::Graphics::Gdi::Rectangle(mem, btn.left, btn.top, btn.right, btn.bottom);
+                SelectObject(mem, old_brush);
                 SelectObject(mem, old_pen);
                 let _ = DeleteObject(pen.into());
-                let btn_color = if d.can_rule() { pal.text } else { pal.gray };
+                let btn_color = if !d.can_rule() {
+                    pal.gray
+                } else if btn_hovered || btn_pressed {
+                    pal.hl_text
+                } else {
+                    pal.text
+                };
                 draw_text_center(mem, "设为规则", bl, bt, br, bb, s, btn_color);
 
                 // ── 操作行 ──

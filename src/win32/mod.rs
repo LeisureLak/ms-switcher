@@ -6,5 +6,6 @@
 pub mod device_notify;
 pub mod host;
 pub mod menu;
+pub mod scroll_hook;
 pub mod submenu;
 pub mod tray;

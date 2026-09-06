@@ -59,6 +59,10 @@ fn main() {
         return;
     }
 
+    // 滚轮模式（轨迹球特化）：配置开启时装载 WH_MOUSE_LL 常驻钩子
+    let scroll_enabled = state.app.cfg.scroll.enabled;
+    win32::scroll_hook::set_enabled(&mut state, scroll_enabled);
+
     // MSS_DEBUG_MENU=1：启动即弹出菜单（自动化冒烟测试用）
     if std::env::var("MSS_DEBUG_MENU").is_ok() {
         debug_open_menu(&state);

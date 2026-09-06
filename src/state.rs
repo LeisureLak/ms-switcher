@@ -206,6 +206,7 @@ mod tests {
         let original_wheel = speed::get_wheel();
         let cfg = Config {
             rules: vec![rule("056E", "01C5", 4)],
+            scroll: Default::default(),
         };
         let st = AppState {
             cfg,

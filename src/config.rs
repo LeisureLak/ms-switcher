@@ -24,10 +24,41 @@ fn default_speed() -> u32 {
     10
 }
 
+/// 滚轮模式配置：按住触发键时鼠标移动转为纵向滚轮，松开恢复。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrollCfg {
+    /// 功能总开关。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 触发键（默认侧键1）。
+    #[serde(default)]
+    pub trigger: crate::scroll::TriggerBtn,
+    /// 灵敏度（像素/齿，5–200，越小越灵敏）。
+    #[serde(default = "default_scroll_px")]
+    pub px_per_notch: u32,
+}
+
+impl Default for ScrollCfg {
+    fn default() -> Self {
+        ScrollCfg {
+            enabled: false,
+            trigger: crate::scroll::TriggerBtn::default(),
+            px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
+        }
+    }
+}
+
+fn default_scroll_px() -> u32 {
+    crate::scroll::SCROLL_PX_DEFAULT
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// 旧配置缺失时用默认值（功能关、侧键1、40 像素/齿）。
+    #[serde(default)]
+    pub scroll: ScrollCfg,
 }
 
 impl Config {

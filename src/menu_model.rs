@@ -26,6 +26,7 @@ pub const CHECK_W: f32 = 18.0;
 // ── 纯数据与格式化 ─────────────────────────────────────
 
 use crate::devices::Device;
+use crate::scroll::{TriggerBtn, SCROLL_PX_MAX, SCROLL_PX_MIN};
 use crate::state::AppState;
 
 /// 由设备清单与规则状态构建菜单设备行（UI 无关，两种 UI 共用）。
@@ -220,12 +221,44 @@ pub fn wheel_slider_top() -> f32 {
     wheel_label_top() + TITLE_H
 }
 
+// ── 滚轮模式区（滚轮滑块之下）：模式勾选行 + 触发行 + 灵敏度标签 + 灵敏度滑块 ──
+
+/// 「滚轮模式」勾选行的 y 起点（点）。
+pub fn scroll_mode_top() -> f32 {
+    wheel_slider_top() + SLIDER_H + SEP_H
+}
+
+/// 「触发键」行的 y 起点（点）。
+pub fn scroll_trigger_top() -> f32 {
+    scroll_mode_top() + ROW_H
+}
+
+/// 「滚动灵敏度」标签行的 y 起点（点）。
+pub fn scroll_sens_label_top() -> f32 {
+    scroll_trigger_top() + ROW_H
+}
+
+/// 滚轮灵敏度 Trackbar 的 y 起点（点）。
+pub fn scroll_sens_slider_top() -> f32 {
+    scroll_sens_label_top() + TITLE_H
+}
+
+/// 「生效规则」信息行的 y 起点（点）。
+pub fn eff_row_top() -> f32 {
+    scroll_sens_slider_top() + SLIDER_H + SEP_H
+}
+
 /// 菜单窗口总高度（点）。
 pub fn menu_height(n_devs: usize) -> f32 {
     let dev_rows = if n_devs == 0 { INFO_ROW_H } else { n_devs as f32 * ROW_H };
     TOP_PAD
         + TITLE_H
         + SLIDER_H
+        + TITLE_H
+        + SLIDER_H
+        + SEP_H
+        + ROW_H
+        + ROW_H
         + TITLE_H
         + SLIDER_H
         + SEP_H
@@ -241,7 +274,7 @@ pub fn menu_height(n_devs: usize) -> f32 {
 
 /// 设备行布局：第 `idx` 行的菜单内 y 坐标起点（点）。
 pub fn device_row_top(idx: usize) -> f32 {
-    wheel_slider_top() + SLIDER_H + SEP_H + INFO_ROW_H + SEP_H + idx as f32 * ROW_H
+    eff_row_top() + INFO_ROW_H + SEP_H + idx as f32 * ROW_H
 }
 
 /// 「开机自启」行的 y 起点（点）。
@@ -259,6 +292,10 @@ pub fn exit_row_top(n_devs: usize) -> f32 {
 pub enum RowHit {
     /// 第 idx 个设备行。
     Device(usize),
+    /// 「滚轮模式」勾选行。
+    ScrollMode,
+    /// 「触发键」录入行。
+    ScrollTrigger,
     Autostart,
     Exit,
     /// 标题/滑块/生效规则行/空白等非命令区域。
@@ -275,6 +312,14 @@ pub fn row_at(y: f32, n_devs: usize) -> RowHit {
                 return RowHit::Device(i as usize);
             }
         }
+    }
+    let mode = scroll_mode_top();
+    if y >= mode && y < mode + ROW_H {
+        return RowHit::ScrollMode;
+    }
+    let trig = scroll_trigger_top();
+    if y >= trig && y < trig + ROW_H {
+        return RowHit::ScrollTrigger;
     }
     let auto = autostart_row_top(n_devs);
     if y >= auto && y < auto + ROW_H {
@@ -301,6 +346,10 @@ pub enum Hover {
     Reset,
     /// 设备行。
     Device(usize),
+    /// 「滚轮模式」勾选行。
+    ScrollMode,
+    /// 「触发键」录入行。
+    ScrollTrigger,
     Autostart,
     Exit,
 }
@@ -313,6 +362,8 @@ pub fn hover_at(x: f32, y: f32, n_devs: usize) -> Option<Hover> {
     }
     match row_at(y, n_devs) {
         RowHit::Device(i) => Some(Hover::Device(i)),
+        RowHit::ScrollMode => Some(Hover::ScrollMode),
+        RowHit::ScrollTrigger => Some(Hover::ScrollTrigger),
         RowHit::Autostart => Some(Hover::Autostart),
         RowHit::Exit => Some(Hover::Exit),
         RowHit::Other => None,
@@ -325,10 +376,17 @@ pub fn hover_at(x: f32, y: f32, n_devs: usize) -> Option<Hover> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuAction {
     SetSpeed(u32),
-    ResetSpeed,
+    /// 恢复 Windows 默认：指针 10 + 滚轮 3 行/齿。
+    ResetDefault,
     /// 以子菜单滑块值保存该设备的规则（指针 + 滚轮）。
     SetRuleWithSpeed(usize, u32, u32),
     ToggleAutostart,
+    /// 开/关滚轮模式（按住触发键移动 = 纵向滚轮）。
+    ToggleScrollMode,
+    /// 触发键录入：已在录入态则取消，否则进入录入（下一个菜单外的鼠标键生效）。
+    CaptureTrigger,
+    /// 滚轮灵敏度（像素/齿，5–200）。
+    SetScrollSens(u32),
     SetRule(usize),
     DelRule(usize),
     Reapply(usize),
@@ -348,6 +406,16 @@ pub struct MenuModel {
     pub wheel_val: u32,
     /// 滚轮滑块拖动中的预览值。
     pub pending_wheel: Option<u32>,
+    /// 滚轮模式开关（按住触发键移动 = 纵向滚轮）。
+    pub scroll_on: bool,
+    /// 滚轮模式触发键。
+    pub scroll_trigger: TriggerBtn,
+    /// 已应用的滚轮灵敏度（像素/齿，5–200）。
+    pub scroll_px: u32,
+    /// 灵敏度滑块拖动中的预览值。
+    pub pending_scroll_px: Option<u32>,
+    /// 正在录入触发键（下一个菜单外的鼠标键成为触发键）。
+    pub capturing: bool,
     /// 子菜单目标：设备索引 + 行的菜单内 y 起点。Some = 子菜单应显示。
     pub sub_hover: Option<(usize, f32)>,
     /// 子菜单滑块的本地预览值（纯本地，点「设为规则」才写入规则）。
@@ -357,12 +425,20 @@ pub struct MenuModel {
     /// 子菜单窗口回报的「指针在子菜单内」。
     /// 光标在菜单与子菜单之间移动时靠它保持子菜单不闪关。
     pub sub_pointer_inside: bool,
-    /// 键盘焦点行（扁平索引：0..devs 为设备行，devs 为自启行，devs+1 为退出行）。
+    /// 键盘焦点行（扁平索引：0 = 滚轮模式，1 = 触发键，2..2+n 为设备行，
+    /// 2+n 为自启行，3+n 为退出行）。
     pub kb_focus: Option<usize>,
 }
 
 impl MenuModel {
-    pub fn new(speed_val: u32, wheel_val: u32, autostart_on: bool) -> MenuModel {
+    pub fn new(
+        speed_val: u32,
+        wheel_val: u32,
+        autostart_on: bool,
+        scroll_on: bool,
+        scroll_trigger: TriggerBtn,
+        scroll_px: u32,
+    ) -> MenuModel {
         MenuModel {
             devs: Vec::new(),
             effective: None,
@@ -371,6 +447,11 @@ impl MenuModel {
             pending_speed: None,
             wheel_val: wheel_val.clamp(1, 100),
             pending_wheel: None,
+            scroll_on,
+            scroll_trigger,
+            scroll_px: scroll_px.clamp(SCROLL_PX_MIN, SCROLL_PX_MAX),
+            pending_scroll_px: None,
+            capturing: false,
             sub_hover: None,
             sub_slider: None,
             sub_wheel: None,
@@ -418,6 +499,25 @@ impl MenuModel {
         })
     }
 
+    /// 标题行显示的滚轮灵敏度（拖动中显示预览值）。
+    pub fn display_scroll_px(&self) -> u32 {
+        self.pending_scroll_px.unwrap_or(self.scroll_px)
+    }
+
+    /// 灵敏度滑块拖动中：只更新预览（夹取 5–200）。
+    pub fn preview_scroll_px(&mut self, v: i32) {
+        self.pending_scroll_px = Some(v.clamp(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as u32);
+    }
+
+    /// 灵敏度滑块松手（语义同 [`MenuModel::commit_speed`]）。
+    pub fn commit_scroll_px(&mut self) -> Option<u32> {
+        let v = self.pending_scroll_px.take()?;
+        (v != self.scroll_px).then(|| {
+            self.scroll_px = v;
+            v
+        })
+    }
+
     /// 子菜单滑块预览（夹取 1–20）。
     pub fn preview_sub_slider(&mut self, v: i32) {
         self.sub_slider = Some(v.clamp(1, 20) as u32);
@@ -444,18 +544,20 @@ impl MenuModel {
     pub fn click_at(&self, x: f32, y: f32) -> Vec<MenuAction> {
         let (l, t, r, b) = reset_btn_rect();
         if x >= l && x < r && y >= t && y < b {
-            return vec![MenuAction::ResetSpeed];
+            return vec![MenuAction::ResetDefault];
         }
         match row_at(y, self.devs.len()) {
+            RowHit::ScrollMode => vec![MenuAction::ToggleScrollMode],
+            RowHit::ScrollTrigger => vec![MenuAction::CaptureTrigger],
             RowHit::Autostart => vec![MenuAction::ToggleAutostart],
             RowHit::Exit => vec![MenuAction::Exit],
             _ => Vec::new(),
         }
     }
 
-    /// 键盘焦点移到下一行（设备行 → 自启 → 退出，循环）。
+    /// 键盘焦点移到下一行（滚轮模式 → 触发键 → 设备行… → 自启 → 退出，循环）。
     pub fn kb_focus_next(&mut self) {
-        let n = self.devs.len() + 2;
+        let n = self.devs.len() + 4;
         self.kb_focus = Some(match self.kb_focus {
             Some(i) => (i + 1) % n,
             None => 0,
@@ -464,7 +566,7 @@ impl MenuModel {
 
     /// 键盘焦点移到上一行。
     pub fn kb_focus_prev(&mut self) {
-        let n = self.devs.len() + 2;
+        let n = self.devs.len() + 4;
         self.kb_focus = Some(match self.kb_focus {
             Some(0) => n - 1,
             Some(i) => i - 1,
@@ -473,10 +575,13 @@ impl MenuModel {
     }
 
     /// Enter/Space 激活当前键盘焦点行。设备行无命令动作。
+    /// 焦点扁平索引：0 = 滚轮模式，1 = 触发键，2..2+n = 设备行，2+n = 自启，3+n = 退出。
     pub fn kb_activate(&self) -> Vec<MenuAction> {
         match self.kb_focus {
-            Some(i) if i < self.devs.len() => Vec::new(),
-            Some(i) if i == self.devs.len() => vec![MenuAction::ToggleAutostart],
+            Some(0) => vec![MenuAction::ToggleScrollMode],
+            Some(1) => vec![MenuAction::CaptureTrigger],
+            Some(i) if i >= 2 && i < 2 + self.devs.len() => Vec::new(),
+            Some(i) if i == 2 + self.devs.len() => vec![MenuAction::ToggleAutostart],
             _ => vec![MenuAction::Exit],
         }
     }
@@ -558,16 +663,36 @@ mod tests {
         // 设备行 0 与行 3
         assert_eq!(row_at(device_row_top(0) + 1.0, n), RowHit::Device(0));
         assert_eq!(row_at(device_row_top(3) + ROW_H - 0.5, n), RowHit::Device(3));
+        // 滚轮模式区：勾选行、触发行（顺序在设备区之上）
+        assert_eq!(row_at(scroll_mode_top() + 1.0, n), RowHit::ScrollMode);
+        assert_eq!(row_at(scroll_trigger_top() + 1.0, n), RowHit::ScrollTrigger);
+        assert_eq!(
+            row_at(scroll_mode_top() - 1.0, n),
+            RowHit::Other,
+            "滚轮滑块与模式行之间的分隔带不是命令区"
+        );
         // 设备区之后：自启、退出
         assert_eq!(row_at(autostart_row_top(n) + 1.0, n), RowHit::Autostart);
         assert_eq!(row_at(exit_row_top(n) + 1.0, n), RowHit::Exit);
-        // 标题、滑块、滚轮行、规则行、设备区与自启行之间的分隔带、菜单底部 padding
+        // 标题、滑块、滚轮行、灵敏度行、规则行、设备区与自启行之间的分隔带、菜单底部 padding
         assert_eq!(row_at(1.0, n), RowHit::Other);
         assert_eq!(row_at(wheel_label_top() + 1.0, n), RowHit::Other);
+        assert_eq!(row_at(scroll_sens_label_top() + 1.0, n), RowHit::Other);
+        assert_eq!(row_at(eff_row_top() + 1.0, n), RowHit::Other);
         assert_eq!(row_at(device_row_top(n) + SEP_H / 2.0, n), RowHit::Other);
         assert_eq!(row_at(menu_height(n) - 1.0, n), RowHit::Other);
         // 无设备时设备区为占位信息行，不是 Device
         assert_eq!(row_at(device_row_top(0) + 1.0, 0), RowHit::Other);
+    }
+
+    #[test]
+    fn scroll_rows_layout_order() {
+        // 垂直顺序：滚轮滑块 → 模式行 → 触发行 → 灵敏度标签 → 灵敏度滑块 → 规则行
+        assert!(scroll_mode_top() >= wheel_slider_top() + SLIDER_H);
+        assert!(scroll_trigger_top() >= scroll_mode_top() + ROW_H);
+        assert!(scroll_sens_slider_top() >= scroll_sens_label_top() + TITLE_H);
+        assert!(eff_row_top() >= scroll_sens_slider_top() + SLIDER_H);
+        assert!(device_row_top(0) > eff_row_top());
     }
 
     fn model() -> MenuModel {
@@ -579,6 +704,11 @@ mod tests {
             pending_speed: None,
             wheel_val: 3,
             pending_wheel: None,
+            scroll_on: false,
+            scroll_trigger: TriggerBtn::X1,
+            scroll_px: 40,
+            pending_scroll_px: None,
+            capturing: false,
             sub_hover: None,
             sub_slider: None,
             sub_wheel: None,
@@ -616,6 +746,14 @@ mod tests {
     fn click_rows_produce_actions() {
         let n = 2;
         let m = model();
+        assert_eq!(
+            m.click_at(60.0, scroll_mode_top() + 5.0),
+            vec![MenuAction::ToggleScrollMode]
+        );
+        assert_eq!(
+            m.click_at(60.0, scroll_trigger_top() + 5.0),
+            vec![MenuAction::CaptureTrigger]
+        );
         assert_eq!(m.click_at(60.0, autostart_row_top(n) + 5.0), vec![MenuAction::ToggleAutostart]);
         assert_eq!(m.click_at(60.0, exit_row_top(n) + 5.0), vec![MenuAction::Exit]);
         // 设备行、标题行无点击命令
@@ -630,8 +768,8 @@ mod tests {
         // 按钮中心
         let (l, t, r, b) = reset_btn_rect();
         assert_eq!(hover_at((l + r) / 2.0, (t + b) / 2.0, n), Some(Hover::Reset));
-        // 按钮点击 → ResetSpeed
-        assert_eq!(m.click_at((l + r) / 2.0, (t + b) / 2.0), vec![MenuAction::ResetSpeed]);
+        // 按钮点击 → ResetDefault
+        assert_eq!(m.click_at((l + r) / 2.0, (t + b) / 2.0), vec![MenuAction::ResetDefault]);
         // 按钮左侧仍是标题行，非命令区
         assert_eq!(hover_at(l - 10.0, (t + b) / 2.0, n), None);
         // 设备行 hover
@@ -640,26 +778,33 @@ mod tests {
 
     #[test]
     fn kb_focus_navigation_and_activation() {
-        let mut m = model(); // 2 台设备 → 索引 0,1 设备；2 自启；3 退出
+        let mut m = model(); // 2 台设备 → 索引 0 滚轮模式；1 触发键；2,3 设备；4 自启；5 退出
         assert_eq!(m.kb_activate(), vec![MenuAction::Exit], "无焦点时 Enter 退出（保底）");
         m.kb_focus_next();
         assert_eq!(m.kb_focus, Some(0));
+        assert_eq!(m.kb_activate(), vec![MenuAction::ToggleScrollMode]);
         m.kb_focus_next();
         assert_eq!(m.kb_focus, Some(1));
+        assert_eq!(m.kb_activate(), vec![MenuAction::CaptureTrigger]);
+        m.kb_focus_next();
+        assert_eq!(m.kb_focus, Some(2));
+        assert!(m.kb_activate().is_empty(), "设备行 Enter 无动作");
+        m.kb_focus_next();
+        assert_eq!(m.kb_focus, Some(3));
         assert!(m.kb_activate().is_empty(), "设备行 Enter 无动作");
         m.kb_focus_next();
         assert_eq!(m.kb_activate(), vec![MenuAction::ToggleAutostart]);
         m.kb_focus_next();
         assert_eq!(m.kb_activate(), vec![MenuAction::Exit]);
-        // 循环回设备行 0
+        // 循环回滚轮模式行
         m.kb_focus_next();
         assert_eq!(m.kb_focus, Some(0));
         // 反向
         m.kb_focus_prev();
+        assert_eq!(m.kb_focus, Some(5));
+        m.kb_focus_prev();
+        m.kb_focus_prev();
         assert_eq!(m.kb_focus, Some(3));
-        m.kb_focus_prev();
-        m.kb_focus_prev();
-        assert_eq!(m.kb_focus, Some(1));
     }
 
     #[test]
@@ -702,6 +847,23 @@ mod tests {
         m.preview_wheel(100);
         assert_eq!(m.commit_wheel(), None);
         assert_eq!(m.commit_wheel(), None);
+    }
+
+    #[test]
+    fn scroll_px_preview_then_commit() {
+        let mut m = model();
+        m.preview_scroll_px(0);
+        assert_eq!(m.pending_scroll_px, Some(5), "下界夹取 5");
+        m.preview_scroll_px(999);
+        assert_eq!(m.pending_scroll_px, Some(200), "上界夹取 200");
+        assert_eq!(m.display_scroll_px(), 200);
+        assert_eq!(m.scroll_px, 40);
+        assert_eq!(m.commit_scroll_px(), Some(200));
+        assert_eq!(m.scroll_px, 200);
+        // 同值不提交；无拖动为 None
+        m.preview_scroll_px(200);
+        assert_eq!(m.commit_scroll_px(), None);
+        assert_eq!(m.commit_scroll_px(), None);
     }
 
     #[test]
