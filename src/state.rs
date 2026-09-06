@@ -164,8 +164,15 @@ mod tests {
         }
     }
 
+    /// 这些测试真实读写系统级鼠标速度（全局状态），并行执行会互相干扰，
+    /// 用互斥锁强制串行。
+    static SPEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 构造一个已插入“轨迹球规则(056E:01C5 -> 4)”的空状态，返回 (状态, 原始滑块值)。
     fn state_with_rule() -> (AppState, u32) {
+        // 必须先持锁再读系统速度：速度是全局真实状态，其它并行测试
+        // 的写入都发生在持锁区间内，先读后锁会读到被污染的值。
+        let _lock = SPEED_LOCK.lock().unwrap();
         let original = speed::get();
         let cfg = Config {
             rules: vec![rule("056E", "01C5", 4)],
@@ -183,6 +190,7 @@ mod tests {
     fn insert_applies_rule_and_remove_restores() {
         let (mut st, original) = state_with_rule();
         let _g = SpeedGuard(original);
+        let _lock = SPEED_LOCK.lock().unwrap();
         let tb = dev("ID-A", "056E", "01C5");
         st.on_device_inserted(&tb);
         assert_eq!(st.applied_speed, 4);
@@ -199,6 +207,7 @@ mod tests {
     fn non_rule_device_does_not_change_speed() {
         let (mut st, original) = state_with_rule();
         let _g = SpeedGuard(original);
+        let _lock = SPEED_LOCK.lock().unwrap();
         let other = dev("ID-B", "1234", "5678");
         st.on_device_inserted(&other);
         assert_eq!(st.applied_speed, original);
@@ -209,6 +218,7 @@ mod tests {
     fn apply_diff_detects_insert_and_remove() {
         let (mut st, original) = state_with_rule();
         let _g = SpeedGuard(original);
+        let _lock = SPEED_LOCK.lock().unwrap();
         // 初始：轨迹球已插入
         st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
         assert_eq!(st.applied_speed, 4);
@@ -225,6 +235,7 @@ mod tests {
     fn remove_last_rule_device_restores_original() {
         let (mut st, original) = state_with_rule();
         let _g = SpeedGuard(original);
+        let _lock = SPEED_LOCK.lock().unwrap();
         let tb = dev("ID-A", "056E", "01C5");
         let other = dev("ID-B", "1234", "5678");
         // 轨迹球先插，普通鼠标后插（不动速度）
@@ -242,6 +253,7 @@ mod tests {
     fn two_rule_devices_last_inserted_wins() {
         let (mut st, original) = state_with_rule();
         let _g = SpeedGuard(original);
+        let _lock = SPEED_LOCK.lock().unwrap();
         st.cfg.rules.push(rule("AAAA", "BBBB", 7));
         let a = dev("ID-A", "056E", "01C5"); // 规则 4
         let b = dev("ID-B", "AAAA", "BBBB"); // 规则 7

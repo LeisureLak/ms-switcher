@@ -1,62 +1,64 @@
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
-};
-use windows::Win32::UI::WindowsAndMessaging::{HICON, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP};
+//! 托盘图标（tray-icon crate）。
+//!
+//! 事件通过 TrayIconEvent 全局通道转发：tray.rs 不再需要窗口回调消息，
+//! 点击信号由 main.rs 的事件线程写入 app::TRAY_CLICK。
 
-/// 托盘图标回调消息（WM_APP + 1）。
-pub const WM_TRAYICON: u32 = WM_APP + 1;
+use tray_icon::TrayIcon;
 
-pub struct Tray {
-    nid: NOTIFYICONDATAW,
+pub struct TrayHandle {
+    icon: TrayIcon,
 }
 
-// Tray 只被创建它的主线程（窗口过程）访问；static Mutex 仅用于让窗口过程拿到可变引用。
-// NOTIFYICONDATAW 内含 HWND（裸指针），标记 Send 在本程序单线程使用场景下是安全的。
-unsafe impl Send for Tray {}
-
-impl Tray {
+impl TrayHandle {
     /// 添加托盘图标；失败返回 None。
-    pub fn add(hwnd: HWND, icon: HICON) -> Option<Tray> {
-        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        nid.uCallbackMessage = WM_TRAYICON;
-        nid.hIcon = icon;
-        set_tip(&mut nid, "MouseSpeedSwitcher");
-        let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
-        if !ok.as_bool() {
-            return None;
-        }
-        Some(Tray { nid })
+    pub fn new(tip: &str) -> Option<TrayHandle> {
+        let icon = make_icon()?;
+        let tray = tray_icon::TrayIconBuilder::new()
+            .with_tooltip(tip)
+            .with_icon(icon)
+            .build()
+            .ok()?;
+        Some(TrayHandle { icon: tray })
     }
 
-    pub fn set_tip(&mut self, tip: &str) {
-        set_tip(&mut self.nid, tip);
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.nid);
-        }
-    }
-
-    pub fn remove(&mut self) {
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
-        }
+    pub fn set_tip(&self, tip: &str) {
+        let _ = self.icon.set_tooltip(Some(tip.to_string()));
     }
 }
 
-fn set_tip(nid: &mut NOTIFYICONDATAW, tip: &str) {
-    let mut chars = tip.encode_utf16();
-    for slot in nid.szTip.iter_mut() {
-        *slot = chars.next().unwrap_or(0);
-    }
-}
+// TrayIcon 内部句柄由 crate 管理，跨线程安全。
+unsafe impl Send for TrayHandle {}
+unsafe impl Sync for TrayHandle {}
 
-/// 托盘事件是否应弹出菜单（左键或右键抬起）。
-pub fn is_click(msg: u32, lparam: isize) -> bool {
-    let e = lparam as u32;
-    msg == WM_TRAYICON && (e == WM_LBUTTONUP as u32 || e == WM_RBUTTONUP as u32)
+/// 生成一个简单的程序图标（32×32 RGBA：深蓝圆 + 浅色指针点缀）。
+fn make_icon() -> Option<tray_icon::Icon> {
+    const S: usize = 32;
+    let mut rgba = vec![0u8; S * S * 4];
+    let c = (S as f32 - 1.0) / 2.0;
+    for y in 0..S {
+        for x in 0..S {
+            let dx = x as f32 - c;
+            let dy = y as f32 - c;
+            let d = (dx * dx + dy * dy).sqrt();
+            let i = (y * S + x) * 4;
+            if d <= c {
+                // 深蓝圆底
+                let (r, g, b) = (0x00, 0x78, 0xD7);
+                // 中间画一个白色小三角（模拟指针）
+                let inside_triangle =
+                    dy > -2.0 && dy < 8.0 && dx > -6.0 + dy * 0.45 && dx < -1.0 + dy * 0.45;
+                if inside_triangle {
+                    rgba[i] = 0xFF;
+                    rgba[i + 1] = 0xFF;
+                    rgba[i + 2] = 0xFF;
+                } else {
+                    rgba[i] = r;
+                    rgba[i + 1] = g;
+                    rgba[i + 2] = b;
+                }
+                rgba[i + 3] = 0xFF;
+            }
+        }
+    }
+    tray_icon::Icon::from_rgba(rgba, S as u32, S as u32).ok()
 }

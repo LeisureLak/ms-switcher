@@ -1,1 +1,31 @@
-/target
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE / editor
+/.idea/
+/.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Windows executables / debug symbols when copied outside target
+*.exe
+*.pdb
+*.dll
+
+# Environment / local config
+.env
+.env.local
+
+# PowerShell redirection artifact (literally a file named $null)
+/$null
+
+# Backup / temp
+*~
+*.tmp
+*.swp
