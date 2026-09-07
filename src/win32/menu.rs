@@ -704,11 +704,13 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            // 按下反馈：只在命令区登记按压态，松手且未移出才触发
+            // 按下反馈：只在命令区/有规则设备行登记按压态，松手且未移出才触发
             let state = &mut *ptr;
             let (x, y) = dip_from_lp(hwnd, lp);
             state.pressed = match hover_at(x, y, state.model.ruled_devs.len()) {
-                Some(h @ (Hover::Reset | Hover::Autostart | Hover::Exit)) => Some(h),
+                Some(h @ (Hover::Reset | Hover::Autostart | Hover::Exit | Hover::Device(_))) => {
+                    Some(h)
+                }
                 _ => None,
             };
             if state.pressed.is_some() {
@@ -910,7 +912,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             invalidate_state(state);
             true // 不关闭菜单（与旧版一致）
         }
-        MenuAction::SetRule(i) => {
+        MenuAction::SetRule(i, alias) => {
             if let Some(d) = state.model.devs.get(i) {
                 if let (Some(v), Some(p)) = (d.vid.clone(), d.pid.clone()) {
                     // 「用当前速度保存规则」：指针与滚轮都取当前系统值，滚轮模式保留旧值
@@ -924,7 +926,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                     state
                         .app
                         .cfg
-                        .set_rule(&v, &p, cur, Some(wheel), scroll, Some(d.name.clone()));
+                        .set_rule(&v, &p, cur, Some(wheel), scroll, Some(d.name.clone()), alias);
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
@@ -932,14 +934,14 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             }
             false
         }
-        MenuAction::SetRuleWithSpeed(i, sp, wh, scroll) => {
+        MenuAction::SetRuleWithSpeed(i, sp, wh, scroll, alias) => {
             if let Some(d) = state.model.devs.get(i) {
                 if let (Some(v), Some(p)) = (d.vid.clone(), d.pid.clone()) {
-                    // 「设为规则」按钮：指针、滚轮、滚轮模式都取子菜单本地值
+                    // 「设为规则」按钮：指针、滚轮、滚轮模式、别名都取子菜单本地值
                     state
                         .app
                         .cfg
-                        .set_rule(&v, &p, sp, Some(wh), scroll, Some(d.name.clone()));
+                        .set_rule(&v, &p, sp, Some(wh), scroll, Some(d.name.clone()), alias);
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
@@ -961,6 +963,14 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
         MenuAction::Reapply(_) => {
             state.app.reapply();
             super::scroll_hook::sync(state);
+            false
+        }
+        MenuAction::ActivateRule(idx) => {
+            if let Some(d) = state.model.devs.get(idx) {
+                state.app.activate_rule(&d.instance_id);
+                state.model.effective = menu_model::effective_info(&state.app);
+                super::scroll_hook::sync(state);
+            }
             false
         }
         MenuAction::Exit => {
@@ -1283,8 +1293,9 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
             let d = &model.devs[global];
             let top = device_row_top(local);
             let hovered = state.hover == Some(Hover::Device(local));
+            let pressed = state.pressed == Some(Hover::Device(local));
             let focused = model.kb_focus == Some(local);
-            let color = if hovered { pal.hl_text } else { pal.text };
+            let color = if hovered || pressed { pal.hl_text } else { pal.text };
             draw_row_bg(
                 hdc,
                 top,
@@ -1292,7 +1303,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                 s,
                 w,
                 hovered,
-                false,
+                pressed,
                 focused,
                 pal.highlight,
                 pal.row_pressed,

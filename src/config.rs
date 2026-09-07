@@ -24,6 +24,9 @@ pub struct Rule {
     pub scroll: Option<ScrollCfg>,
     #[serde(default)]
     pub note: Option<String>,
+    /// 显示别名；设置后替代设备名在菜单/提示中显示。
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 fn default_speed() -> u32 {
@@ -73,6 +76,7 @@ impl Config {
         wheel: Option<u32>,
         scroll: Option<ScrollCfg>,
         note: Option<String>,
+        alias: Option<String>,
     ) {
         if let Some(r) = self
             .rules
@@ -83,6 +87,7 @@ impl Config {
             r.wheel = wheel;
             r.scroll = scroll;
             r.note = note;
+            r.alias = alias;
         } else {
             self.rules.push(Rule {
                 vid: vid.to_ascii_uppercase(),
@@ -91,6 +96,7 @@ impl Config {
                 wheel,
                 scroll,
                 note,
+                alias,
             });
         }
     }

@@ -42,16 +42,16 @@ pub fn build_dev_rows(mice: &[Device], st: &AppState) -> Vec<DevRow> {
     });
     mice.iter()
         .map(|dev| {
-            let (rule_speed, rule_wheel, rule_scroll) = dev
+            let (rule_speed, rule_wheel, rule_scroll, rule_alias) = dev
                 .vid
                 .as_deref()
                 .zip(dev.pid.as_deref())
                 .and_then(|(v, p)| {
                     st.cfg
                         .rule_for(v, p)
-                        .map(|r| (Some(r.speed), r.wheel, r.scroll.clone()))
+                        .map(|r| (Some(r.speed), r.wheel, r.scroll.clone(), r.alias.clone()))
                 })
-                .unwrap_or((None, None, None));
+                .unwrap_or((None, None, None, None));
             let is_effective = rule_speed.is_some()
                 && effective
                     .as_ref()
@@ -61,12 +61,14 @@ pub fn build_dev_rows(mice: &[Device], st: &AppState) -> Vec<DevRow> {
                     })
                     .unwrap_or(false);
             DevRow {
+                instance_id: dev.instance_id.clone(),
                 name: dev.name.clone(),
                 vid: dev.vid.clone(),
                 pid: dev.pid.clone(),
                 rule_speed,
                 rule_wheel,
                 rule_scroll,
+                rule_alias,
                 is_effective,
             }
         })
@@ -102,7 +104,12 @@ pub struct EffectiveInfo {
 /// 当前生效规则的完整信息，用于主菜单生效规则三行与 tooltip。
 pub fn effective_info(st: &AppState) -> Option<EffectiveInfo> {
     st.effective_rule().map(|(d, r)| EffectiveInfo {
-        name: d.name.clone(),
+        name: r
+            .alias
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&d.name)
+            .to_string(),
         speed: r.speed,
         wheel: r.wheel,
         scroll: r.scroll.clone(),
@@ -112,6 +119,8 @@ pub fn effective_info(st: &AppState) -> Option<EffectiveInfo> {
 /// 一台设备的菜单行数据。
 #[derive(Debug, Clone)]
 pub struct DevRow {
+    /// 设备实例 ID（唯一，用于手动切换时精确匹配）。
+    pub instance_id: String,
     pub name: String,
     pub vid: Option<String>,
     pub pid: Option<String>,
@@ -121,16 +130,24 @@ pub struct DevRow {
     pub rule_wheel: Option<u32>,
     /// 当前规则的滚轮模式配置（None = 无规则或规则不带滚轮模式）。
     pub rule_scroll: Option<ScrollCfg>,
+    /// 当前规则别名（None = 显示设备原始名）。
+    pub rule_alias: Option<String>,
     /// 是否为当前生效规则设备。
     pub is_effective: bool,
 }
 
 impl DevRow {
     /// 设备行显示文本（规则速度不再此处显示，改由绘制层的小齿轮图标表示）。
+    /// 若规则设置了非空别名，使用别名替代设备名。
     pub fn row_text(&self) -> String {
         let vid = self.vid.as_deref().unwrap_or("----");
         let pid = self.pid.as_deref().unwrap_or("----");
-        format!("{}  [{}:{}]", self.name, vid, pid)
+        let name = self
+            .rule_alias
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&self.name);
+        format!("{name}  [{vid}:{pid}]")
     }
 
     /// 是否可配置规则（有 VID/PID）。
@@ -159,15 +176,33 @@ impl DevRow {
 }
 
 // ── 子菜单布局 ─────────────────────────────────────────
-// 信息行 / 指针标签 / 指针滑块 / 滚轮标签 / 滚轮滑块 / 滚轮模式勾选 / 触发键 /
+// 信息行 / 别名 / 指针标签 / 指针滑块 / 滚轮标签 / 滚轮滑块 / 滚轮模式勾选 / 触发键 /
 // 灵敏度标签 / 灵敏度滑块 / 「设为规则」按钮 / 3 操作行
 
 /// 子菜单信息行 y 起点（点）。
 pub const SUB_INFO_TOP: f32 = 4.0;
 
+/// 「别名」标签/编辑行 y 起点（点）。
+pub fn sub_alias_top() -> f32 {
+    SUB_INFO_TOP + SUB_ROW_H
+}
+
+/// 别名标签列宽（点）。
+pub const SUB_ALIAS_LABEL_W: f32 = 42.0;
+
+/// 子菜单别名编辑框矩形（DIP）。
+pub fn sub_alias_edit_rect() -> (f32, f32, f32, f32) {
+    (
+        PAD + SUB_ALIAS_LABEL_W,
+        sub_alias_top() + 2.0,
+        SUB_W - PAD,
+        sub_alias_top() + SUB_ROW_H - 2.0,
+    )
+}
+
 /// 「指针速度: N」标签行 y 起点（点）。
 pub fn sub_ptr_label_top() -> f32 {
-    SUB_INFO_TOP + SUB_ROW_H
+    sub_alias_top() + SUB_ROW_H
 }
 
 /// 子菜单指针 Trackbar 的 y 起点（点）。
@@ -497,12 +532,15 @@ pub enum MenuAction {
     SetSpeed(u32),
     /// 恢复 Windows 默认：指针 10 + 滚轮 3 行/齿。
     ResetDefault,
-    /// 以子菜单滑块值保存该设备的规则（指针 + 滚轮 + 滚轮模式）。
-    SetRuleWithSpeed(usize, u32, u32, Option<ScrollCfg>),
+    /// 以子菜单滑块值保存该设备的规则（指针 + 滚轮 + 滚轮模式 + 别名）。
+    SetRuleWithSpeed(usize, u32, u32, Option<ScrollCfg>, Option<String>),
     ToggleAutostart,
-    SetRule(usize),
+    /// 用当前速度保存规则，可携带新别名。
+    SetRule(usize, Option<String>),
     DelRule(usize),
     Reapply(usize),
+    /// 手动激活该规则设备：视为重新插入到 active 末尾。
+    ActivateRule(usize),
     Exit,
 }
 
@@ -707,14 +745,15 @@ impl MenuModel {
         self.update_sub_hover(local_idx.map(|i| self.other_devs[i]), row_top);
     }
 
-    /// 点击菜单内 (x, y)：映射为命令动作。设备行本身无点击命令
-    /// （悬停展开子菜单），标题/滑块/规则行返回空。
+    /// 点击菜单内 (x, y)：映射为命令动作。有规则设备行点击 = 手动激活；
+    /// 标题/滑块/规则行返回空。
     pub fn click_at(&self, x: f32, y: f32) -> Vec<MenuAction> {
         let (l, t, r, b) = reset_btn_rect();
         if x >= l && x < r && y >= t && y < b {
             return vec![MenuAction::ResetDefault];
         }
         match row_at(y, self.ruled_devs.len()) {
+            RowHit::Device(local) => vec![MenuAction::ActivateRule(self.ruled_devs[local])],
             RowHit::Autostart => vec![MenuAction::ToggleAutostart],
             RowHit::Exit => vec![MenuAction::Exit],
             _ => Vec::new(),
@@ -740,12 +779,15 @@ impl MenuModel {
         });
     }
 
-    /// Enter/Space 激活当前键盘焦点行。有规则设备行与「其他设备」入口无命令动作。
+    /// Enter/Space 激活当前键盘焦点行。有规则设备行 = 手动激活规则；
+    /// 「其他设备」入口无命令动作。
     /// 焦点扁平索引：0..n 为有规则设备行，n 为「其他设备」入口，
     /// n+1 为自启，n+2 为退出。
     pub fn kb_activate(&self) -> Vec<MenuAction> {
         match self.kb_focus {
-            Some(i) if i < self.ruled_devs.len() => Vec::new(),
+            Some(i) if i < self.ruled_devs.len() => {
+                vec![MenuAction::ActivateRule(self.ruled_devs[i])]
+            }
             Some(i) if i == self.ruled_devs.len() => Vec::new(),
             Some(i) if i == self.ruled_devs.len() + 1 => vec![MenuAction::ToggleAutostart],
             _ => vec![MenuAction::Exit],
@@ -759,12 +801,14 @@ mod tests {
 
     fn dev(name: &str, vid: Option<&str>, pid: Option<&str>, rule: Option<u32>) -> DevRow {
         DevRow {
+            instance_id: name.into(),
             name: name.into(),
             vid: vid.map(Into::into),
             pid: pid.map(Into::into),
             rule_speed: rule,
             rule_wheel: None,
             rule_scroll: None,
+            rule_alias: None,
             is_effective: false,
         }
     }
@@ -774,6 +818,14 @@ mod tests {
         let d = dev("轨迹球", Some("046D"), Some("C52B"), Some(4));
         assert_eq!(d.row_text(), "轨迹球  [046D:C52B]");
         assert!(d.can_rule());
+
+        let mut with_alias = d.clone();
+        with_alias.rule_alias = Some("办公".into());
+        assert_eq!(with_alias.row_text(), "办公  [046D:C52B]");
+
+        // 空/纯空白别名应回退到设备名
+        with_alias.rule_alias = Some("   ".into());
+        assert_eq!(with_alias.row_text(), "轨迹球  [046D:C52B]");
 
         let blind = dev("盲设备", None, None, None);
         assert_eq!(blind.row_text(), "盲设备  [----:----]");
@@ -916,8 +968,12 @@ mod tests {
             m.click_at(60.0, exit_row_top(n) + 5.0),
             vec![MenuAction::Exit]
         );
-        // 设备行（有规则设备）、标题行无点击命令
-        assert!(m.click_at(60.0, device_row_top(0) + 5.0).is_empty());
+        // 有规则设备行点击 → 手动激活
+        assert_eq!(
+            m.click_at(60.0, device_row_top(0) + 5.0),
+            vec![MenuAction::ActivateRule(m.ruled_devs[0])]
+        );
+        // 标题行无点击命令
         assert!(m.click_at(60.0, 1.0).is_empty());
     }
 
@@ -960,7 +1016,11 @@ mod tests {
         );
         m.kb_focus_next();
         assert_eq!(m.kb_focus, Some(0));
-        assert!(m.kb_activate().is_empty(), "设备行 Enter 无动作");
+        assert_eq!(
+            m.kb_activate(),
+            vec![MenuAction::ActivateRule(m.ruled_devs[0])],
+            "设备行 Enter 手动激活"
+        );
         m.kb_focus_next();
         assert_eq!(m.kb_focus, Some(1));
         assert!(m.kb_activate().is_empty(), "其他设备入口 Enter 无动作");

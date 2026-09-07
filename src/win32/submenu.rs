@@ -15,40 +15,42 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush, DeleteDC,
-    DeleteObject, EndPaint, FillRect, FrameRect, InvalidateRect, PAINTSTRUCT, PS_SOLID, SRCCOPY,
-    SelectObject, SetBkMode, TRANSPARENT,
+    DeleteObject, EndPaint, FillRect, FrameRect, HBRUSH, HDC, InvalidateRect, PAINTSTRUCT, PS_SOLID,
+    SRCCOPY, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    TBM_SETPOS, TBM_SETRANGE, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASS, WM_MOUSELEAVE,
+    SetWindowTheme, TBM_SETPOS, TBM_SETRANGE, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASS, WM_MOUSELEAVE,
 };
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    EnableWindow, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW,
-    GetWindowRect, HMENU, PostMessageW, SW_SHOWNA, SendMessageW, SetWindowLongPtrW, ShowWindow,
-    WM_ERASEBKGND, WM_HSCROLL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NOTIFY, WM_PAINT,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetParent, HMENU, PostMessageW,
+    SetWindowTextW, SW_SHOWNA, SendMessageW, SetWindowLongPtrW, ShowWindow, WM_ERASEBKGND,
+    WM_HSCROLL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NOTIFY,
+    WM_PAINT, WM_CTLCOLOREDIT, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WS_BORDER, WINDOW_STYLE,
+    WINDOW_EX_STYLE,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 use crate::menu_model::{
-    DevRow, Hover, MenuAction, PAD, SUB_INFO_TOP, SUB_ROW_H, SUB_W, sub_action_top, sub_btn_at,
-    sub_btn_rect, sub_height, sub_kb_trigger_at, sub_kb_trigger_top, sub_ptr_label_top,
-    sub_row_at, sub_scroll_mode_at, sub_scroll_mode_top, sub_scroll_sens_label_top,
-    sub_scroll_sens_rect, sub_scroll_trigger_at, sub_scroll_trigger_top, sub_slider_rect,
-    sub_wheel_label_top, sub_wheel_rect,
+    DevRow, Hover, MenuAction, PAD, SUB_INFO_TOP, SUB_ROW_H, SUB_W, sub_action_top,
+    sub_alias_edit_rect, sub_alias_top, sub_btn_at, sub_btn_rect, sub_height, sub_kb_trigger_at,
+    sub_kb_trigger_top, sub_ptr_label_top, sub_row_at, sub_scroll_mode_at, sub_scroll_mode_top,
+    sub_scroll_sens_label_top, sub_scroll_sens_rect, sub_scroll_trigger_at, sub_scroll_trigger_top,
+    sub_slider_rect, sub_wheel_label_top, sub_wheel_rect,
 };
 use crate::scroll::{SCROLL_PX_DEFAULT, SCROLL_PX_MAX, SCROLL_PX_MIN};
 
-use super::host::{HostState, WM_APP_CLOSE_SUBMENU};
+use super::host::{HostState, WM_APP_CLOSE_MENU, WM_APP_CLOSE_SUBMENU, WM_APP_SUB_LEFT};
 use super::menu::{
     SUB_CLASS, apply_dwm, current_pal, dip_from_lp, dpi_scale, draw_check, draw_text,
     draw_text_center, register_class, trackbar_notify, trackbar_proc, trackbar_theme,
@@ -56,6 +58,39 @@ use super::menu::{
 
 /// TBM_GETPOS 未包含在 windows crate 绑定中，值为 WM_USER（与 menu.rs 一致）。
 const TBM_GETPOS: u32 = win::WM_USER;
+
+/// 标准 EDIT 控件类名。
+const EDIT_CLASS: windows::core::PCWSTR = w!("EDIT");
+/// Edit 控件样式：单行、自动水平滚动、带边框。
+const ES_AUTOHSCROLL: u32 = 0x0080;
+/// 子类 id 6：别名编辑框（Esc 转发 + leave 通知）。
+const ALIAS_SUBCLASS_ID: usize = 6;
+
+/// UTF-8 → 以 null 结尾的 UTF-16 缓冲区。
+fn to_wsz(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 读取 Edit 控件当前文本。
+fn get_window_text(hwnd: HWND) -> String {
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len == 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        let got = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..got as usize])
+    }
+}
+
+/// 读取子菜单别名编辑框当前值；空或纯空白返回 None。
+fn current_alias(state: &HostState) -> Option<String> {
+    state
+        .sub_alias_edit
+        .map(get_window_text)
+        .filter(|t| !t.trim().is_empty())
+}
 
 /// 按模型子菜单状态开/关/切换子菜单窗口（主菜单/other 列表 WM_MOUSEMOVE/LEAVE 驱动）。
 /// `owner_hwnd` 为单设备配置子菜单贴靠的父窗口（主菜单或「其他设备」列表）。
@@ -149,6 +184,47 @@ fn open(
     state.model.sub_wheel = Some(init_wh);
     // 滚轮模式初值：有规则取规则，否则无（未启用）
     state.model.sub_scroll = d.and_then(|d| d.rule_scroll.clone());
+
+    // 别名编辑框
+    let (al, at, ar, ab) = sub_alias_edit_rect();
+    let alias_edit = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            EDIT_CLASS,
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL),
+            ((al * s).round()) as i32,
+            ((at * s).round()) as i32,
+            (((ar - al) * s).round()) as i32,
+            (((ab - at) * s).round()) as i32,
+            Some(hwnd),
+            Some(HMENU(6 as *mut c_void)),
+            Some(hinstance.into()),
+            None,
+        )?
+    };
+    unsafe {
+        // 去除主题，让 WM_CTLCOLOREDIT 完全接管颜色
+        let _ = SetWindowTheme(alias_edit, None::<&PCWSTR>, None::<&PCWSTR>);
+        // 初始内容：当前别名（空表示无）
+        let initial = d.and_then(|d| d.rule_alias.as_deref()).unwrap_or("");
+        let _ = SetWindowTextW(alias_edit, PCWSTR(to_wsz(initial).as_ptr()));
+        // 使用菜单字体
+        let _ = SendMessageW(
+            alias_edit,
+            win::WM_SETFONT,
+            Some(WPARAM(state.font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        // 子类：转发 Esc + 子控件 leave 通知
+        let _ = SetWindowSubclass(
+            alias_edit,
+            Some(alias_edit_proc),
+            ALIAS_SUBCLASS_ID,
+            state.hwnd.0 as usize,
+        );
+    }
+    state.sub_alias_edit = Some(alias_edit);
 
     // 指针滑块（1–20）
     let (sl, st, sr, sb) = sub_slider_rect();
@@ -296,9 +372,9 @@ fn makelong(lo: i32, hi: i32) -> u32 {
     (lo as u16 as u32) | ((hi as u16 as u32) << 16)
 }
 
-/// 光标是否位于窗口矩形内。子菜单含滑块子控件：指针移到子控件上时
+/// 光标是否位于窗口矩形内。子菜单含滑块/编辑子控件：指针移到子控件上时
 /// 父窗口收不到 WM_MOUSEMOVE 只会收到 WM_MOUSELEAVE，靠本函数区分
-/// 「移到滑块上」与「真正离开窗口」。
+/// 「移到子控件上」与「真正离开窗口」。
 pub fn cursor_inside_window(hwnd: HWND) -> bool {
     unsafe {
         let mut pt = POINT::default();
@@ -312,6 +388,70 @@ pub fn cursor_inside_window(hwnd: HWND) -> bool {
     }
 }
 
+/// 为 WM_CTLCOLOREDIT 提供与当前主题一致的画刷。
+/// 画刷按颜色缓存，颜色变化时删除旧刷；退出时最多泄漏当前一个画刷。
+fn alias_edit_brush(bg: COLORREF) -> HBRUSH {
+    use std::cell::RefCell;
+    thread_local! {
+        static BRUSH: RefCell<Option<(HBRUSH, u32)>> = RefCell::new(None);
+    }
+    if let Some((b, c)) = BRUSH.with(|b| *b.borrow()) {
+        if c == bg.0 {
+            return b;
+        }
+        // 颜色变了：删除旧刷
+        unsafe {
+            let _ = DeleteObject(b.into());
+        }
+    }
+    let new = unsafe { CreateSolidBrush(bg) };
+    BRUSH.with(|b| *b.borrow_mut() = Some((new, bg.0)));
+    new
+}
+
+/// 别名编辑框子类：Esc 关闭菜单，TrackMouseEvent leave 时通知宿主重查。
+unsafe extern "system" fn alias_edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _uid: usize,
+    data: usize,
+) -> LRESULT {
+    match msg {
+        WM_MOUSEMOVE => {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
+        }
+        WM_MOUSELEAVE => {
+            // 光标离开编辑框：若已离开父级子菜单，请求宿主重查
+            let host = HWND(data as *mut c_void);
+            if let Some(parent) = GetParent(hwnd).ok() {
+                if !cursor_inside_window(parent) {
+                    let _ = PostMessageW(
+                        Some(host),
+                        WM_APP_SUB_LEFT,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+        }
+        WM_KEYDOWN if wp.0 as u32 == VK_ESCAPE.0 as u32 => {
+            let host = HWND(data as *mut c_void);
+            let _ = PostMessageW(Some(host), WM_APP_CLOSE_MENU, WPARAM(0), LPARAM(0));
+            return LRESULT(0);
+        }
+        _ => {}
+    }
+    DefSubclassProc(hwnd, msg, wp, lp)
+}
+
 /// 关闭子菜单（先摘除再销毁；主菜单保持打开）。
 pub fn close(state: &mut HostState) {
     if let Some(h) = state.sub.take() {
@@ -321,6 +461,7 @@ pub fn close(state: &mut HostState) {
         state.sub_trackbar = None;
         state.sub_wheel_trackbar = None;
         state.sub_scroll_trackbar = None;
+        state.sub_alias_edit = None;
         state.model.sub_slider = None;
         state.model.sub_wheel = None;
         state.model.sub_scroll = None;
@@ -351,6 +492,17 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
 
     match msg {
         WM_ERASEBKGND => LRESULT(1),
+        WM_CTLCOLOREDIT => {
+            // 让 EDIT 控件使用父窗口主题色：背景 + 文字
+            let state = &*ptr;
+            let hdc = HDC(wp.0 as *mut c_void);
+            let pal = current_pal(state);
+            unsafe {
+                let _ = SetTextColor(hdc, pal.text);
+                let _ = SetBkColor(hdc, pal.bg);
+            }
+            LRESULT(alias_edit_brush(pal.bg).0 as isize)
+        }
         WM_PAINT => {
             paint(ptr, hwnd);
             LRESULT(0)
@@ -500,7 +652,7 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                 if let (Some(dev), Some(s)) = (state.sub_dev, slot) {
                     match s {
                         3 => {
-                            // 「设为规则」：以滑块预览值写入该设备规则（指针 + 滚轮 + 滚轮模式）
+                            // 「设为规则」：以滑块预览值写入该设备规则（指针 + 滚轮 + 滚轮模式 + 别名）
                             if let (Some(sp), Some(wh)) =
                                 (state.model.sub_slider, state.model.sub_wheel)
                             {
@@ -518,6 +670,7 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                                             sp,
                                             wh,
                                             state.model.sub_scroll.clone(),
+                                            current_alias(state),
                                         )],
                                     );
                                 }
@@ -568,8 +721,9 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                                 .map(|d: &DevRow| d.sub_actions()[s].1)
                                 .unwrap_or(false);
                             if enabled {
+                                let alias = current_alias(state);
                                 let action = match s {
-                                    0 => MenuAction::SetRule(dev),
+                                    0 => MenuAction::SetRule(dev, alias),
                                     1 => MenuAction::DelRule(dev),
                                     _ => MenuAction::Reapply(dev),
                                 };
@@ -632,6 +786,16 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
                     SUB_INFO_TOP + SUB_ROW_H / 2.0,
                     s,
                     pal.gray,
+                );
+
+                // ── 别名标签 ──
+                draw_text(
+                    mem,
+                    "别名",
+                    PAD,
+                    sub_alias_top() + SUB_ROW_H / 2.0,
+                    s,
+                    pal.text,
                 );
 
                 // ── 指针标签行（拖动中实时显示当前档位）──

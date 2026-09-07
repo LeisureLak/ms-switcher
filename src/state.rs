@@ -150,6 +150,44 @@ impl AppState {
         self.applied_speed = cur;
         self.applied_wheel = cur_wheel;
     }
+
+    /// 手动激活某规则设备：从当前位置取出并重新插入到 active 末尾，
+    /// 视为「刚刚插入」。记录当前系统速度为该设备的恢复基线，然后应用其规则。
+    pub fn activate_rule(&mut self, instance_id: &str) {
+        let pos = self
+            .active
+            .iter()
+            .position(|(id, _)| id == instance_id);
+        let pos = match pos {
+            Some(p) => p,
+            None => return,
+        };
+
+        // 已在末尾：等价于当前生效，无需改动
+        if pos == self.active.len() - 1 {
+            return;
+        }
+
+        let (id, dev) = self.active.remove(pos);
+
+        if let Some(rule) = self.rule_for(&dev) {
+            // 先把规则值复制出来，避免借用冲突
+            let (target_speed, target_wheel) = (rule.speed, rule.wheel);
+
+            // 记录「激活前」的系统速度作为该设备的恢复基线
+            let prev = (speed::get(), speed::get_wheel());
+            self.saved.insert(id.clone(), prev);
+
+            self.applied_speed = target_speed;
+            speed::set(target_speed);
+            if let Some(w) = target_wheel {
+                self.applied_wheel = w;
+                speed::set_wheel(w);
+            }
+        }
+
+        self.active.push((id, dev));
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +203,7 @@ mod tests {
             wheel: None,
             scroll: None,
             note: None,
+            alias: None,
         }
     }
 
@@ -185,8 +224,9 @@ mod tests {
     }
 
     /// 测试会真实调用 SystemParametersInfo 修改系统速度（全局状态）；
-    /// 守卫保证断言失败时也恢复指针与滚轮。
-    struct SpeedGuard(u32, u32);
+    /// 守卫在析构时恢复指针与滚轮，并持有互斥锁保证恢复操作也在串行区间内。
+    #[allow(dead_code)]
+    struct SpeedGuard(u32, u32, std::sync::MutexGuard<'static, ()>);
     impl Drop for SpeedGuard {
         fn drop(&mut self) {
             speed::set(self.0);
@@ -198,11 +238,12 @@ mod tests {
     /// 用互斥锁强制串行。
     static SPEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// 构造一个已插入“轨迹球规则(056E:01C5 -> 4)”的空状态，返回 (状态, 原始速度, 原始滚轮)。
-    fn state_with_rule() -> (AppState, u32, u32) {
+    /// 构造一个已插入“轨迹球规则(056E:01C5 -> 4)”的空状态，
+    /// 返回 (状态, 原始速度, 原始滚轮, 速度守卫)。
+    fn state_with_rule() -> (AppState, u32, u32, SpeedGuard) {
         // 必须先持锁再读系统速度：速度是全局真实状态，其它并行测试
         // 的写入都发生在持锁区间内，先读后锁会读到被污染的值。
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let lock = SPEED_LOCK.lock().unwrap();
         let original = speed::get();
         let original_wheel = speed::get_wheel();
         let cfg = Config {
@@ -215,14 +256,13 @@ mod tests {
             applied_speed: original,
             applied_wheel: original_wheel,
         };
-        (st, original, original_wheel)
+        (st, original, original_wheel, SpeedGuard(original, original_wheel, lock))
     }
 
     #[test]
     fn insert_applies_rule_and_remove_restores() {
-        let (mut st, original, original_wheel) = state_with_rule();
-        let _g = SpeedGuard(original, original_wheel);
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
         let tb = dev("ID-A", "056E", "01C5");
         st.on_device_inserted(&tb);
         assert_eq!(st.applied_speed, 4);
@@ -242,9 +282,8 @@ mod tests {
 
     #[test]
     fn rule_wheel_switches_and_restores() {
-        let (mut st, original, original_wheel) = state_with_rule();
-        let _g = SpeedGuard(original, original_wheel);
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
         st.cfg.rules[0] = rule_with_wheel("056E", "01C5", 4, 9);
 
         let tb = dev("ID-A", "056E", "01C5");
@@ -261,9 +300,8 @@ mod tests {
 
     #[test]
     fn non_rule_device_does_not_change_speed() {
-        let (mut st, original, original_wheel) = state_with_rule();
-        let _g = SpeedGuard(original, original_wheel);
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
         let other = dev("ID-B", "1234", "5678");
         st.on_device_inserted(&other);
         assert_eq!(st.applied_speed, original);
@@ -273,9 +311,8 @@ mod tests {
 
     #[test]
     fn apply_diff_detects_insert_and_remove() {
-        let (mut st, original, original_wheel) = state_with_rule();
-        let _g = SpeedGuard(original, original_wheel);
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
         // 初始：轨迹球已插入
         st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
         assert_eq!(st.applied_speed, 4);
@@ -291,9 +328,8 @@ mod tests {
 
     #[test]
     fn remove_last_rule_device_restores_original() {
-        let (mut st, original, original_wheel) = state_with_rule();
-        let _g = SpeedGuard(original, original_wheel);
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
         let tb = dev("ID-A", "056E", "01C5");
         let other = dev("ID-B", "1234", "5678");
         // 轨迹球先插，普通鼠标后插（不动速度）
@@ -310,9 +346,8 @@ mod tests {
 
     #[test]
     fn two_rule_devices_last_inserted_wins() {
-        let (mut st, original, original_wheel) = state_with_rule();
-        let _g = SpeedGuard(original, original_wheel);
-        let _lock = SPEED_LOCK.lock().unwrap();
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
         st.cfg.rules.push(rule("AAAA", "BBBB", 7));
         let a = dev("ID-A", "056E", "01C5"); // 规则 4
         let b = dev("ID-B", "AAAA", "BBBB"); // 规则 7
@@ -340,5 +375,57 @@ mod tests {
         assert_eq!(st.applied_wheel, original_wheel);
         assert!(st.effective_rule().is_none());
         assert_eq!(st.active_rule_count(), 0);
+    }
+
+    #[test]
+    fn activate_rule_moves_to_end_and_changes_effective() {
+        let (mut st, _original, _original_wheel, _g) = state_with_rule();
+
+        st.cfg.rules.push(rule("AAAA", "BBBB", 7));
+        let a = dev("ID-A", "056E", "01C5"); // 规则 4
+        let b = dev("ID-B", "AAAA", "BBBB"); // 规则 7
+
+        // A 先插入，B 后插入：当前生效 B（速度 7）
+        st.apply_diff(&[a, b]);
+        assert_eq!(st.applied_speed, 7);
+        assert_eq!(st.effective_rule().map(|(d, _)| d.instance_id.as_str()), Some("ID-B"));
+
+        // 手动激活 A：A 移到末尾，应用 A 的规则 4
+        st.activate_rule("ID-A");
+        assert_eq!(st.applied_speed, 4);
+        assert_eq!(speed::get(), 4);
+        assert_eq!(st.effective_rule().map(|(d, _)| d.instance_id.as_str()), Some("ID-A"));
+        assert_eq!(st.active.len(), 2);
+        assert_eq!(st.active[1].0, "ID-A");
+
+        // 手动激活已经处于末尾的 B：无变化
+        st.activate_rule("ID-B");
+        assert_eq!(st.applied_speed, 7);
+        assert_eq!(st.effective_rule().map(|(d, _)| d.instance_id.as_str()), Some("ID-B"));
+    }
+
+    #[test]
+    fn activate_rule_updates_removal_baseline() {
+        let (mut st, _original, original_wheel, _g) = state_with_rule();
+
+        st.cfg.rules.push(rule("AAAA", "BBBB", 7));
+        let a = dev("ID-A", "056E", "01C5"); // 规则 4
+        let b = dev("ID-B", "AAAA", "BBBB"); // 规则 7
+
+        st.apply_diff(&[a, b]);
+        // 当前生效 B（速度 7）
+        st.activate_rule("ID-A");
+        // A 的恢复基线应记录为 B 的规则速度 7
+        assert_eq!(st.saved.get("ID-A"), Some(&(7, original_wheel)));
+
+        // 此时 active: [B, A]，拔出 B：剩余 A 生效，速度保持 4
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+        assert_eq!(st.applied_speed, 4);
+        assert_eq!(st.effective_rule().map(|(d, _)| d.instance_id.as_str()), Some("ID-A"));
+
+        // 再拔出 A：无规则设备，应恢复到 A 手动激活前的速度 7
+        st.apply_diff(&[]);
+        assert_eq!(st.applied_speed, 7);
+        assert_eq!(st.applied_wheel, original_wheel);
     }
 }

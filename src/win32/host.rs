@@ -97,6 +97,8 @@ pub struct HostState {
     pub sub_wheel_trackbar: Option<HWND>,
     /// 设备子菜单内的滚动灵敏度 Trackbar（本地预览）。
     pub sub_scroll_trackbar: Option<HWND>,
+    /// 设备子菜单内的别名编辑框（EDIT 控件）。
+    pub sub_alias_edit: Option<HWND>,
     /// 菜单字体（按菜单窗口 DPI 创建，菜单关闭时销毁）。
     pub font: windows::Win32::Graphics::Gdi::HFONT,
     /// 设备子菜单窗口（单设备配置面板）。
@@ -147,6 +149,7 @@ impl HostState {
             sub_trackbar: None,
             sub_wheel_trackbar: None,
             sub_scroll_trackbar: None,
+            sub_alias_edit: None,
             font: windows::Win32::Graphics::Gdi::HFONT::default(),
             sub: None,
             sub_dev: None,
@@ -643,6 +646,7 @@ pub fn close_menu(state: &mut HostState) {
         state.sub_trackbar = None;
         state.sub_wheel_trackbar = None;
         state.sub_scroll_trackbar = None;
+        state.sub_alias_edit = None;
         state.hover = None;
         if !state.font.0.is_null() {
             unsafe {
