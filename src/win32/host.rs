@@ -150,7 +150,8 @@ impl HostState {
             scroll: crate::scroll::ScrollEngine::default(),
             theme_dark: menu::system_dark(),
             hc: menu::high_contrast(),
-            debug: std::env::var("MSS_DEBUG_MENU").is_ok(),
+            debug: std::env::var("MSS_DEBUG").is_ok()
+                || std::env::var("MSS_DEBUG_MENU").is_ok(),
         })
     }
 }

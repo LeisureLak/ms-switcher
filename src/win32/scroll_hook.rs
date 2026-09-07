@@ -147,6 +147,13 @@ fn effective_scroll(state: &HostState) -> Option<ScrollCfg> {
 pub fn sync_kb_hook(state: &mut HostState) {
     let need = effective_scroll(state).and_then(|s| s.kb_trigger).is_some()
         || KB_CAPTURING.load(Ordering::Acquire);
+    if state.debug {
+        eprintln!(
+            "[mss-debug] sync_kb_hook need={} kb_trigger={:?}",
+            need,
+            effective_scroll(state).and_then(|s| s.kb_trigger)
+        );
+    }
     if need {
         install_kb(state);
     } else {

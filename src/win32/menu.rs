@@ -21,9 +21,9 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap, CreateCompatibleDC,
     CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT,
     DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawFocusRect, DrawTextW,
-    EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect, HDC, HFONT, InvalidateRect, LineTo,
-    MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    Ellipse, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect, GetStockObject, HDC, HFONT,
+    InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID,
+    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -1176,14 +1176,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                 draw_gear(hdc, top + ROW_H / 2.0, s, color);
             }
             if d.rule_scroll.as_ref().map_or(false, |s| s.enabled) {
-                draw_text(
-                    hdc,
-                    "滚",
-                    PAD + CHECK_W + RULE_ICON_W,
-                    top + ROW_H / 2.0,
-                    s,
-                    color,
-                );
+                draw_scroll(hdc, top + ROW_H / 2.0, s, color);
             }
             draw_text(
                 hdc,
@@ -1375,6 +1368,38 @@ fn draw_gear(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
         // 闭合轮廓
         let _ = LineTo(hdc, pts[0].x, pts[0].y);
         SelectObject(hdc, old);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// 滚轮模式图标（小鼠标轮廓 + 轮线），绘制在齿轮右侧的滚轮图标列。
+/// 椭圆会按当前画刷填充，先选 NULL_BRUSH 只留轮廓（暗色主题下不能填白）。
+fn draw_scroll(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
+    unsafe {
+        let cx = (PAD + CHECK_W + RULE_ICON_W * 1.5) * s;
+        let cy = cy_dip * s;
+        let rx = 4.0 * s;
+        let ry = 5.5 * s;
+        let pen = CreatePen(PS_SOLID, (1.5 * s).round().max(1.0) as i32, color);
+        let old_pen = SelectObject(hdc, pen.into());
+        let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        let _ = Ellipse(
+            hdc,
+            (cx - rx).round() as i32,
+            (cy - ry).round() as i32,
+            (cx + rx).round() as i32,
+            (cy + ry).round() as i32,
+        );
+        SelectObject(hdc, old_brush);
+        // 滚轮：上半部一小段竖线
+        let _ = MoveToEx(
+            hdc,
+            cx.round() as i32,
+            (cy - 3.5 * s).round() as i32,
+            None,
+        );
+        let _ = LineTo(hdc, cx.round() as i32, (cy - 1.0 * s).round() as i32);
+        SelectObject(hdc, old_pen);
         let _ = DeleteObject(pen.into());
     }
 }
