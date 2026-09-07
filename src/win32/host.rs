@@ -165,6 +165,27 @@ impl HostState {
                 || std::env::var("MSS_DEBUG_MENU").is_ok(),
         })
     }
+
+    /// GUI 子系统没有 stderr，调试用日志同时写入 `%TEMP%\mss_debug.log`
+    /// 并 `eprintln!`（仅当 `self.debug` 为 true）。
+    pub fn debug_log(&self, msg: impl std::fmt::Display) {
+        if !self.debug {
+            return;
+        }
+        let line = format!("[mss-debug] {msg}");
+        eprintln!("{line}");
+        if let Ok(temp) = std::env::var("TEMP") {
+            let path = std::path::PathBuf::from(temp).join("mss_debug.log");
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "{line}")
+                });
+        }
+    }
 }
 
 /// 创建宿主窗口并把 `&mut HostState` 以借用指针接入。
@@ -562,6 +583,9 @@ fn open_menu(state: &mut HostState) {
             state.scroll.active = false;
             state.scroll.mouse_held = false;
             state.scroll.kb_held = false;
+            state.scroll.has_scrolled = false;
+            state.scroll.kb_interrupted = false;
+            state.scroll.win_mask_injected = false;
             scroll_hook::set_menu_open(true);
         }
         Err(e) => {

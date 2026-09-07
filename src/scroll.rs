@@ -224,6 +224,13 @@ pub struct ScrollEngine {
     pub kb_trigger: Option<KbTrigger>,
     /// 当前生效规则的灵敏度（像素/行）。
     pub px_per_line: u32,
+    /// 本次 hold 期间是否已经实际注入了滚轮。
+    pub has_scrolled: bool,
+    /// 本次 hold 期间是否出现过组合键（其它键在滚轮模式激活时被按下）。
+    /// 出现过则取消滚轮模式，避免影响系统快捷键。
+    pub kb_interrupted: bool,
+    /// 本次 hold 期间是否已经注入过 Win 掩码键（防止重复发送）。
+    pub win_mask_injected: bool,
 }
 
 impl Default for ScrollEngine {
@@ -237,6 +244,9 @@ impl Default for ScrollEngine {
             trigger: TriggerBtn::X1,
             kb_trigger: None,
             px_per_line: SCROLL_PX_DEFAULT,
+            has_scrolled: false,
+            kb_interrupted: false,
+            win_mask_injected: false,
         }
     }
 }
@@ -244,7 +254,8 @@ impl Default for ScrollEngine {
 impl ScrollEngine {
     /// 根据鼠标/键盘两个来源的当前状态重新计算 `active`。
     /// `kb_held` 要求调用方已保证「键盘开关键被单独按住（无其它键）」。
-    /// 进入滚轮模式时清零累积器，退出时不动（待注入量仍由队列冲刷）。
+    /// 进入滚轮模式时清零累积器并重置滚动/中断标记，退出时不动
+    ///（待注入量仍由队列冲刷；这些标记要留到本次 hold 结束后再清）。
     pub fn sync_active(&mut self) {
         if !self.enabled {
             self.active = false;
@@ -253,6 +264,9 @@ impl ScrollEngine {
         let want = self.mouse_held || self.kb_held;
         if want && !self.active {
             self.accum.reset();
+            self.has_scrolled = false;
+            self.kb_interrupted = false;
+            self.win_mask_injected = false;
         }
         self.active = want;
     }
@@ -378,6 +392,30 @@ mod tests {
     }
 
     #[test]
+    fn scroll_engine_resets_scroll_and_interrupt_flags_on_enter() {
+        let mut e = ScrollEngine {
+            enabled: true,
+            active: false,
+            mouse_held: false,
+            kb_held: false,
+            accum: WheelAccum::default(),
+            trigger: TriggerBtn::X1,
+            kb_trigger: Some(KbTrigger { vk: 0x5B }),
+            px_per_line: SCROLL_PX_DEFAULT,
+            has_scrolled: true,
+            kb_interrupted: true,
+            win_mask_injected: true,
+        };
+        // 进入滚轮模式时重置 has_scrolled / kb_interrupted / win_mask_injected
+        e.kb_held = true;
+        e.sync_active();
+        assert!(e.active);
+        assert!(!e.has_scrolled);
+        assert!(!e.kb_interrupted);
+        assert!(!e.win_mask_injected);
+    }
+
+    #[test]
     fn scroll_engine_sync_active_handles_both_sources() {
         let mut e = ScrollEngine {
             enabled: true,
@@ -388,6 +426,9 @@ mod tests {
             trigger: TriggerBtn::X1,
             kb_trigger: Some(KbTrigger { vk: 0xA4 }),
             px_per_line: SCROLL_PX_DEFAULT,
+            has_scrolled: false,
+            kb_interrupted: false,
+            win_mask_injected: false,
         };
         // 鼠标按住 → 激活
         e.mouse_held = true;

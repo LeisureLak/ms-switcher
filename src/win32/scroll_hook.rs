@@ -36,7 +36,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, AtomicU32
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -100,11 +101,21 @@ pub fn set_enabled(state: &mut HostState, on: bool) {
     if on {
         install(state);
         register_raw_input(state);
+        // 未激活时清理滚动/中断标记，避免规则切换后残留旧状态；
+        // 若当前正处于 hold 中，则保留，等本次 hold 结束后再自然重置。
+        if !state.scroll.active {
+            state.scroll.has_scrolled = false;
+            state.scroll.kb_interrupted = false;
+            state.scroll.win_mask_injected = false;
+        }
     } else {
         // 关功能时复位激活态：钩子卸了就不会再见到触发键抬起
         state.scroll.active = false;
         state.scroll.mouse_held = false;
         state.scroll.kb_held = false;
+        state.scroll.has_scrolled = false;
+        state.scroll.kb_interrupted = false;
+        state.scroll.win_mask_injected = false;
         state.scroll.sync_active();
         uninstall();
     }
@@ -319,9 +330,7 @@ pub fn on_raw_input(state: &mut HostState, lp: LPARAM) {
         .accum
         .feed(m.lLastY as f32, px, lines_per_notch);
     if units != 0 {
-        if state.debug {
-            eprintln!("[mss-debug] scroll inject {units}");
-        }
+        state.debug_log(format!("scroll inject {units}"));
         queue_wheel(state, units);
     }
 }
@@ -489,8 +498,11 @@ fn trigger_from(msg: u32, mouse_data: u32) -> Option<TriggerBtn> {
 
 /// 钩子回调内调用：累积滚轮量并保证队列里有一条冲刷消息。
 /// 只做内存运算 + PostMessage，绝不在这里 SendInput（见 `WM_APP_SCROLL_INJECT`）。
-fn queue_wheel(state: &HostState, units: i32) {
+fn queue_wheel(state: &mut HostState, units: i32) {
     PENDING_WHEEL.fetch_add(units, Ordering::Relaxed);
+    // 累计到一齿，说明用户本次 hold 确实触发了滚动；
+    // 用于 Win 等修饰键释放时判断是否需特殊处理。
+    state.scroll.has_scrolled = true;
     if !INJECT_POSTED.swap(true, Ordering::AcqRel) {
         let posted = unsafe {
             PostMessageW(Some(state.hwnd), WM_APP_SCROLL_INJECT, WPARAM(0), LPARAM(0)).is_ok()
@@ -533,6 +545,60 @@ fn inject_wheel(delta: i32) {
     unsafe {
         SendInput(&[inp], std::mem::size_of::<INPUT>() as i32);
     }
+}
+
+/// 注入左 Ctrl（scan code 0x1D，AutoHotkey `vk11sc01D`）down + up，
+/// 再注入 `Win up`，并返回成功发送的输入事件数。
+///
+/// 这是 Win 键释放时抑制 Start 菜单的最后手段：物理 `Win up` 被 LL 钩子
+/// 吞掉，取而代之注入 `Ctrl down/up + Win up` 序列。这样 Windows 看到
+/// 的是 `Win` 与 `Ctrl` 的组合键，而不是单独的 Win 释放，从而不打开
+/// Start 菜单；同时 `Win up` 也被注入，避免 Win 键逻辑上卡死。
+///
+/// 该函数在 `keyboard_hook_proc` 内调用，因此 `SendInput` 也会走同一条
+/// 低级钩子链；但注入事件带有 `LLKHF_INJECTED`，本钩子会立即放行，
+/// 不会循环或自锁。
+fn inject_win_release(vk: u32) -> u32 {
+    const LEFT_CTRL_SCAN: u16 = 0x1D;
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: LEFT_CTRL_SCAN,
+                    dwFlags: KEYEVENTF_SCANCODE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: LEFT_CTRL_SCAN,
+                    dwFlags: KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk as u16),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
+    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) }
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -696,24 +762,64 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) 
                     && state.scroll.enabled
                     && state.scroll.kb_trigger.is_some()
                 {
+                    // 记录 update_kb_active 之前是否已处于滚轮模式，
+                    // 用于判断“非触发键按下”是否属于组合键中断。
+                    let was_active = state.scroll.active;
                     update_kb_active(state);
 
                     // 调试输出
-                    if state.debug && (down || up) {
-                        eprintln!(
-                            "[mss-debug] kb evt vk={:#04x} active={} kb_held={}",
-                            vk, state.scroll.active, state.scroll.kb_held
-                        );
+                    if down || up {
+                        state.debug_log(format!(
+                            "kb evt vk={:#04x} active={} kb_held={} has_scrolled={} kb_interrupted={}",
+                            vk,
+                            state.scroll.active,
+                            state.scroll.kb_held,
+                            state.scroll.has_scrolled,
+                            state.scroll.kb_interrupted
+                        ));
                     }
 
-                    // 若开关键被单独按住且进入激活：吞掉鼠标移动由另一个钩子负责，
-                    // 键盘事件不灭活，让系统/应用仍能收到。
-                    if state.scroll.active && !state.scroll.kb_held {
-                        // 组合键触发 → 取消滚轮模式
-                        if state.debug {
-                            eprintln!("[mss-debug] scroll mode OFF (combo triggered)");
-                        }
+                    // 非触发键按下导致 kb_held 失效：标记本次 hold 出现过组合键，
+                    // 随后取消滚轮模式。标记后不再吞掉 Win/Alt 等触发键的抬起。
+                    if down && was_active && !state.scroll.kb_held {
+                        state.scroll.kb_interrupted = true;
+                        state.debug_log("scroll kb interrupted (combo)");
                         state.scroll.sync_active();
+                    } else if state.scroll.active && !state.scroll.kb_held {
+                        // 其它原因导致 kb_held 失效（例如触发键抬起后仍有其它键）
+                        state.debug_log("scroll mode OFF (combo triggered)");
+                        state.scroll.sync_active();
+                    }
+
+                    // Win 键作为触发键且本次 hold 实际滚动过：在 Win 释放时
+                    // 注入 Ctrl 掩码 + Win up，吞掉物理 Win up。
+                    // 这样系统看到的是 `Win` + `Ctrl` 组合键，而不是单独的
+                    // Win 释放，从而不打开 Start 菜单；同时 Win up 被注入，
+                    // Win 键也不会卡死。
+                    if up {
+                        let c = crate::scroll::KbTrigger { vk }.vk_canonical();
+                        let is_win = c == 0x5B; // LWin/RWin canonical 到 0x5B
+                        let is_trigger = state
+                            .scroll
+                            .kb_trigger
+                            .is_some_and(|t| t.vk_canonical() == c);
+                        let was_alone = is_trigger && !any_key_down_except(c);
+
+                        if is_trigger
+                            && is_win
+                            && !state.scroll.kb_interrupted
+                            && was_alone
+                            && state.scroll.has_scrolled
+                        {
+                            let sent = inject_win_release(vk);
+                            state.debug_log(format!(
+                                "swallow Win up, inject mask+Win up: sent={} vk={:#04x}",
+                                sent, vk
+                            ));
+                            if sent == 3 {
+                                return LRESULT(1);
+                            }
+                        }
                     }
                 }
             }
