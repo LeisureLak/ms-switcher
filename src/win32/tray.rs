@@ -3,21 +3,20 @@
 //! 事件通过应用私有消息 `WM_APP_TRAY` 投递到宿主窗口，不再需要独立事件
 //! 线程（对应迁移计划第 7 节）。版本使用 NOTIFYICON_VERSION_4：
 //! `lparam` 低 16 位为通知事件（WM_LBUTTONUP 等）。
+//!
+//! 托盘图标现在从本 exe 嵌入的 `assets/icon.ico`（资源 ID 1）加载，与 exe 图标一致。
 
 #![allow(unsafe_op_in_unsafe_fn)]
-use std::ffi::c_void;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
-    DeleteObject,
-};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON, WM_APP,
-    WM_LBUTTONUP, WM_RBUTTONUP,
+    DestroyIcon, GetSystemMetrics, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, SM_CXSMICON,
+    WM_APP, WM_LBUTTONUP, WM_RBUTTONUP,
 };
 
 /// 托盘回调消息（应用私有）。
@@ -30,96 +29,22 @@ fn tray_icon_size() -> u32 {
     if v > 0 { v as u32 } else { 16 }
 }
 
-/// 生成程序图标的 S×S RGBA 像素（深蓝圆 + 白色指针）。
-fn icon_rgba(size: u32) -> Vec<u8> {
-    let s = size as usize;
-    let mut rgba = vec![0u8; s * s * 4];
-    let c = (size as f32 - 1.0) / 2.0;
-    let k = size as f32 / 32.0; // 原始设计稿按 32px 标注，按尺寸等比缩放
-    for y in 0..s {
-        for x in 0..s {
-            let dx = (x as f32 - c) / k;
-            let dy = (y as f32 - c) / k;
-            let d = ((dx * dx + dy * dy).sqrt()) * k;
-            let i = (y * s + x) * 4;
-            if d <= c {
-                // 深蓝圆底
-                let (r, g, b) = (0x00, 0x78, 0xD7);
-                // 中间画一个白色小三角（模拟指针）
-                let inside_triangle =
-                    dy > -2.0 && dy < 8.0 && dx > -6.0 + dy * 0.45 && dx < -1.0 + dy * 0.45;
-                if inside_triangle {
-                    rgba[i] = 0xFF;
-                    rgba[i + 1] = 0xFF;
-                    rgba[i + 2] = 0xFF;
-                } else {
-                    rgba[i] = r;
-                    rgba[i + 1] = g;
-                    rgba[i + 2] = b;
-                }
-                rgba[i + 3] = 0xFF;
-            }
-        }
-    }
-    rgba
-}
-
-/// 把 RGBA 像素转成带 alpha 通道的 HICON（32bpp 自上而下 DIB + 单色掩码）。
-fn hicon_from_rgba(size: u32, rgba: &[u8]) -> Option<HICON> {
-    let mut bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size as i32,
-            biHeight: -(size as i32),
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits: *mut c_void = std::ptr::null_mut();
-    let hbmp_color =
-        unsafe { CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
-    if bits.is_null() {
-        return None;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(rgba.as_ptr(), bits as *mut u8, (size * size * 4) as usize);
-    }
-    // 掩码位图必须显式清零：CreateBitmap 不初始化位数据，残留垃圾会把
-    // 像素整体掩掉（32bpp 图标虽有 alpha 通道，掩码仍需保证全透明明示）
-    let mask_bits = vec![0u8; ((size + 15) / 16 * 2 * size) as usize];
-    let hbmp_mask = unsafe {
-        CreateBitmap(
-            size as i32,
-            size as i32,
-            1,
-            1,
-            Some(mask_bits.as_ptr() as *const c_void),
+/// 从本 exe 嵌入的资源（assets/icon.ico，资源 ID 1）加载 HICON。
+fn load_tray_icon() -> Option<HICON> {
+    let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None) }.ok()?.into();
+    let size = tray_icon_size() as i32;
+    let handle = unsafe {
+        LoadImageW(
+            Some(hinstance),
+            PCWSTR::from_raw(1 as *const u16),
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
         )
-    };
-    if hbmp_mask.is_invalid() {
-        unsafe {
-            let _ = DeleteObject(hbmp_color.into());
-        }
-        return None;
     }
-    let info = ICONINFO {
-        fIcon: true.into(),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: hbmp_mask,
-        hbmColor: hbmp_color,
-    };
-    let icon = unsafe { CreateIconIndirect(&info) };
-    // CreateIconIndirect 会复制位图，临时位图立即释放
-    unsafe {
-        let _ = DeleteObject(hbmp_color.into());
-        let _ = DeleteObject(hbmp_mask.into());
-    }
-    let _ = &mut bmi;
-    icon.ok()
+    .ok()?;
+    Some(HICON(handle.0 as *mut _))
 }
 
 fn wide(buf: &mut [u16], s: &str) {
@@ -139,9 +64,7 @@ pub struct Tray {
 impl Tray {
     /// 添加托盘图标；失败返回 None。
     pub fn new(hwnd: HWND, tip: &str) -> Option<Tray> {
-        let size = tray_icon_size();
-        let rgba = icon_rgba(size);
-        let icon = hicon_from_rgba(size, &rgba)?;
+        let icon = load_tray_icon()?;
         let mut t = Tray {
             hwnd,
             icon,
