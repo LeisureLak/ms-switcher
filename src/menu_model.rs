@@ -181,9 +181,14 @@ pub fn sub_scroll_trigger_top() -> f32 {
     sub_scroll_mode_top() + SUB_ROW_H
 }
 
+/// 「键盘触发键」行 y 起点（点）。
+pub fn sub_kb_trigger_top() -> f32 {
+    sub_scroll_trigger_top() + SUB_ROW_H
+}
+
 /// 「滚动灵敏度」标签行 y 起点（点）。
 pub fn sub_scroll_sens_label_top() -> f32 {
-    sub_scroll_trigger_top() + SUB_ROW_H
+    sub_kb_trigger_top() + SUB_ROW_H
 }
 
 /// 子菜单滚动灵敏度 Trackbar 的 y 起点（点）。
@@ -201,7 +206,7 @@ pub fn sub_action_top(i: usize) -> f32 {
     sub_btn_top() + SUB_ROW_H + i as f32 * SUB_ROW_H
 }
 
-/// 子菜单窗口高度（信息 + 双滑块 + 滚轮模式区 + 灵敏度滑块 + 按钮 + 3 操作行，底 padding 4 点）。
+/// 子菜单窗口高度（信息 + 双滑块 + 滚轮模式区 + 双触发键 + 灵敏度滑块 + 按钮 + 3 操作行，底 padding 4 点）。
 pub fn sub_height() -> f32 {
     sub_action_top(3) + 4.0
 }
@@ -266,6 +271,12 @@ pub fn sub_scroll_mode_at(x: f32, y: f32) -> bool {
 /// 子菜单内 (x, y) 是否命中「触发键」行。
 pub fn sub_scroll_trigger_at(x: f32, y: f32) -> bool {
     let t = sub_scroll_trigger_top();
+    x >= PAD && x < SUB_W - PAD && y >= t && y < t + SUB_ROW_H
+}
+
+/// 子菜单内 (x, y) 是否命中「键盘触发键」行。
+pub fn sub_kb_trigger_at(x: f32, y: f32) -> bool {
+    let t = sub_kb_trigger_top();
     x >= PAD && x < SUB_W - PAD && y >= t && y < t + SUB_ROW_H
 }
 
@@ -532,6 +543,7 @@ impl MenuModel {
                 self.sub_scroll = Some(ScrollCfg {
                     enabled: true,
                     trigger: TriggerBtn::X1,
+                    kb_trigger: None,
                     px_per_notch: px,
                 });
             }
@@ -546,6 +558,7 @@ impl MenuModel {
                 self.sub_scroll = Some(ScrollCfg {
                     enabled: true,
                     trigger: TriggerBtn::X1,
+                    kb_trigger: None,
                     px_per_notch: SCROLL_PX_DEFAULT,
                 });
             }
@@ -914,12 +927,14 @@ mod tests {
 
     #[test]
     fn sub_layout_hit_tests() {
-        // 垂直顺序：信息行 → 双滑块 → 滚轮模式勾选 → 触发键 → 灵敏度标签 → 灵敏度滑块 → 按钮 → 操作行
+        // 垂直顺序：信息行 → 双滑块 → 滚轮模式勾选 → 触发键 → 键盘触发键 → 灵敏度标签 → 灵敏度滑块 → 按钮 → 操作行
         assert!(sub_ptr_label_top() > SUB_INFO_TOP);
         assert!(sub_ptr_slider_top() >= sub_ptr_label_top() + SUB_ROW_H);
         assert!(sub_wheel_slider_top() >= sub_wheel_label_top() + SUB_ROW_H);
         assert!(sub_scroll_mode_top() >= sub_wheel_slider_top() + SUB_SLIDER_H);
         assert!(sub_scroll_trigger_top() >= sub_scroll_mode_top() + SUB_ROW_H);
+        assert!(sub_kb_trigger_top() >= sub_scroll_trigger_top() + SUB_ROW_H);
+        assert!(sub_scroll_sens_label_top() >= sub_kb_trigger_top() + SUB_ROW_H);
         assert!(sub_scroll_sens_slider_top() >= sub_scroll_sens_label_top() + SUB_ROW_H);
         assert!(sub_btn_top() >= sub_scroll_sens_slider_top() + SUB_SLIDER_H);
         assert!(sub_action_top(0) >= sub_btn_top() + SUB_ROW_H);

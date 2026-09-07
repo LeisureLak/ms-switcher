@@ -39,7 +39,7 @@ use windows::core::w;
 use super::device_notify::MouseDevNotify;
 use super::focus;
 use super::menu;
-use super::scroll_hook::{self, WM_APP_SCROLL_CHANGED, WM_APP_SCROLL_INJECT};
+use super::scroll_hook::{self, WM_APP_KB_SCROLL_CHANGED, WM_APP_SCROLL_CHANGED, WM_APP_SCROLL_INJECT};
 use super::submenu;
 use super::tray::{self, Tray};
 use crate::menu_model::{self, Hover, MenuModel};
@@ -274,8 +274,32 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             scroll_hook::on_raw_input(state, lp);
             DefWindowProcW(hwnd, msg, wp, lp)
         }
+        WM_APP_KB_SCROLL_CHANGED => {
+            // 键盘触发键录入结束（子菜单；wParam 1=已录入(lp=归一化vk) 0=取消）
+            if wp.0 == 1 {
+                let vk = lp.0 as u32;
+                match &mut state.model.sub_scroll {
+                    Some(s) => s.kb_trigger = Some(crate::scroll::KbTrigger { vk }),
+                    None => {
+                        state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
+                            enabled: true,
+                            trigger: crate::scroll::TriggerBtn::X1,
+                            kb_trigger: Some(crate::scroll::KbTrigger { vk }),
+                            px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
+                        });
+                    }
+                }
+                if state.debug {
+                    eprintln!("[mss-debug] kb scroll trigger captured: vk={:#04x}", vk);
+                }
+            }
+            state.model.capturing = scroll_hook::is_capturing();
+            scroll_hook::sync_kb_hook(state);
+            invalidate_menus(state);
+            LRESULT(0)
+        }
         WM_APP_SCROLL_CHANGED => {
-            // 触发键录入结束（子菜单；wParam 1=已录入(lp=键码) 0=取消）
+            // 鼠标触发键录入结束（子菜单；wParam 1=已录入(lp=键码) 0=取消）
             if wp.0 == 1 {
                 if let Some(t) = crate::scroll::TriggerBtn::from_code(lp.0 as u32) {
                     match &mut state.model.sub_scroll {
@@ -284,6 +308,7 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                             state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
                                 enabled: true,
                                 trigger: t,
+                                kb_trigger: None,
                                 px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
                             });
                         }
@@ -500,11 +525,13 @@ fn open_menu(state: &mut HostState) {
             state.pressed = None;
             state.sub_pressed = None;
             install_mouse_close_hook(state.hwnd);
-            // 菜单打开期间滚轮模式放行（侧键恢复正常语义）。
-            // 若打开瞬间触发键恰好按着（如按着侧键点托盘），直接复位激活态——
-            // 菜单打开期间钩子整体放行，再也见不到那次抬起，不复位会永久卡在
-            // 滚轮模式里吞掉所有移动。
+            // 菜单打开期间滚轮模式放行（侧键/键盘恢复正常语义）。
+            // 若打开瞬间鼠标/键盘触发键恰好按着（如按着侧键点托盘），直接复位
+            // 激活态——菜单打开期间钩子整体放行，再也见不到那次抬起，不复位
+            // 会永久卡在滚轮模式里吞掉所有移动。
             state.scroll.active = false;
+            state.scroll.mouse_held = false;
+            state.scroll.kb_held = false;
             scroll_hook::set_menu_open(true);
         }
         Err(e) => {

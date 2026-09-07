@@ -57,17 +57,93 @@ impl TriggerBtn {
     }
 }
 
+/// 可作为滚轮模式开关键的键盘单键（支持左右 Shift/Ctrl/Alt/Win 归一化）。
+///
+/// 语义：单独按住该键时进入滚轮模式；按住期间若又按下其它任意键，
+/// 立即取消滚轮模式，避免影响 `Alt+Tab`、`Ctrl+C` 等系统/应用组合键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KbTrigger {
+    /// 归一化后的虚拟键码。
+    pub vk: u32,
+}
+
+impl KbTrigger {
+    /// 显示名（用于菜单与 tooltip）。
+    pub fn label(self) -> String {
+        vk_label(self.vk_canonical())
+    }
+
+    /// 将左右 Shift/Ctrl/Alt/Win 映射到同一语义键，便于匹配。
+    pub fn vk_canonical(self) -> u32 {
+        canonicalize_vk(self.vk)
+    }
+}
+
+/// 把左右成对的修饰键归一化到同一个虚拟键码。
+fn canonicalize_vk(vk: u32) -> u32 {
+    match vk {
+        0xA0 | 0xA1 => 0x10, // VK_SHIFT
+        0xA2 | 0xA3 => 0x11, // VK_CONTROL
+        0xA4 | 0xA5 => 0x12, // VK_MENU (Alt)
+        0x5C => 0x5B,        // VK_RWIN -> VK_LWIN
+        _ => vk,
+    }
+}
+
+/// 归一化虚拟键码对应的显示名。
+fn vk_label(vk: u32) -> String {
+    match vk {
+        0x08 => "Backspace".to_string(),
+        0x09 => "Tab".to_string(),
+        0x0D => "Enter".to_string(),
+        0x1B => "Esc".to_string(),
+        0x20 => "Space".to_string(),
+        0x21 => "PgUp".to_string(),
+        0x22 => "PgDn".to_string(),
+        0x23 => "End".to_string(),
+        0x24 => "Home".to_string(),
+        0x25 => "Left".to_string(),
+        0x26 => "Up".to_string(),
+        0x27 => "Right".to_string(),
+        0x28 => "Down".to_string(),
+        0x2C => "PrtSc".to_string(),
+        0x2D => "Insert".to_string(),
+        0x2E => "Delete".to_string(),
+        0x30..=0x39 => format!("{}", (b'0' + (vk - 0x30) as u8) as char),
+        0x41..=0x5A => format!("{}", (vk as u8) as char),
+        0x60..=0x69 => format!("Num {}", vk - 0x60),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        0x90 => "Num Lock".to_string(),
+        0x91 => "Scroll Lock".to_string(),
+        0xA0 => "LShift".to_string(),
+        0xA1 => "RShift".to_string(),
+        0xA2 => "LCtrl".to_string(),
+        0xA3 => "RCtrl".to_string(),
+        0xA4 => "LAlt".to_string(),
+        0xA5 => "RAlt".to_string(),
+        0x5B => "Win".to_string(),
+        0x5C => "Win".to_string(),
+        0x10 => "Shift".to_string(),
+        0x11 => "Ctrl".to_string(),
+        0x12 => "Alt".to_string(),
+        0x14 => "Caps Lock".to_string(),
+        _ => format!("VK 0x{vk:02X}"),
+    }
+}
+
 /// 滚轮灵敏度取值范围与默认值（像素/齿：轨迹球滚动多少像素 = 一齿滚轮）。
 /// 值越小越灵敏。Win32 滚轮一齿 = WHEEL_DELTA(120)，在钩子层换算。
 pub const SCROLL_PX_MIN: u32 = 5;
 pub const SCROLL_PX_MAX: u32 = 200;
 pub const SCROLL_PX_DEFAULT: u32 = 40;
 
-/// 设备的滚轮模式配置（按规则保存）：开/关 + 触发键 + 灵敏度。
+/// 设备的滚轮模式配置（按规则保存）：开/关 + 鼠标触发键 + 键盘触发键 + 灵敏度。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrollCfg {
     pub enabled: bool,
     pub trigger: TriggerBtn,
+    /// 可选的键盘开关键（单键，组合键触发时取消）。
+    pub kb_trigger: Option<KbTrigger>,
     pub px_per_notch: u32,
 }
 
@@ -76,6 +152,7 @@ impl Default for ScrollCfg {
         ScrollCfg {
             enabled: false,
             trigger: TriggerBtn::X1,
+            kb_trigger: None,
             px_per_notch: SCROLL_PX_DEFAULT,
         }
     }
@@ -124,10 +201,16 @@ pub struct ScrollEngine {
     pub enabled: bool,
     /// 是否处于「按住触发键」的滚轮模式中。
     pub active: bool,
+    /// 鼠标触发键当前是否被按住。
+    pub mouse_held: bool,
+    /// 键盘开关键当前是否被单独按住（无其它非注入键）。
+    pub kb_held: bool,
     /// 位移 → 齿累积器（位移源是 Raw Input 相对位移，见 win32/scroll_hook.rs）。
     pub accum: WheelAccum,
-    /// 当前生效规则的触发键。
+    /// 当前生效规则的鼠标触发键。
     pub trigger: TriggerBtn,
+    /// 当前生效规则的键盘开关键（单键）。
+    pub kb_trigger: Option<KbTrigger>,
     /// 当前生效规则的灵敏度（像素/齿）。
     pub px_per_notch: u32,
 }
@@ -137,10 +220,30 @@ impl Default for ScrollEngine {
         ScrollEngine {
             enabled: false,
             active: false,
+            mouse_held: false,
+            kb_held: false,
             accum: WheelAccum::default(),
             trigger: TriggerBtn::X1,
+            kb_trigger: None,
             px_per_notch: SCROLL_PX_DEFAULT,
         }
+    }
+}
+
+impl ScrollEngine {
+    /// 根据鼠标/键盘两个来源的当前状态重新计算 `active`。
+    /// `kb_held` 要求调用方已保证「键盘开关键被单独按住（无其它键）」。
+    /// 进入滚轮模式时清零累积器，退出时不动（待注入量仍由队列冲刷）。
+    pub fn sync_active(&mut self) {
+        if !self.enabled {
+            self.active = false;
+            return;
+        }
+        let want = self.mouse_held || self.kb_held;
+        if want && !self.active {
+            self.accum.reset();
+        }
+        self.active = want;
     }
 }
 
@@ -213,5 +316,60 @@ mod tests {
         let mut a = WheelAccum::default();
         assert_eq!(a.feed(-100.0, 0.0), 0);
         assert_eq!(a.feed(-100.0, -5.0), 0);
+    }
+
+    #[test]
+    fn kb_trigger_canonicalizes_sides() {
+        let raw = KbTrigger { vk: 0xA4 }; // Left Alt
+        assert_eq!(raw.vk_canonical(), 0x12);
+        let right = KbTrigger { vk: 0xA5 };
+        assert_eq!(right.vk_canonical(), 0x12);
+        assert_eq!(right.label(), "Alt");
+        assert_eq!(KbTrigger { vk: 0xA0 }.label(), "Shift");
+        assert_eq!(KbTrigger { vk: 0x5C }.label(), "Win");
+        assert_eq!(KbTrigger { vk: 0x70 }.label(), "F1");
+    }
+
+    #[test]
+    fn scroll_cfg_with_kb_trigger_serde_roundtrip() {
+        let cfg = ScrollCfg {
+            enabled: true,
+            trigger: TriggerBtn::X2,
+            kb_trigger: Some(KbTrigger { vk: 0xA4 }),
+            px_per_notch: 30,
+        };
+        let s = serde_json::to_string(&cfg).unwrap();
+        assert!(s.contains("kb_trigger"));
+        let back: ScrollCfg = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn scroll_engine_sync_active_handles_both_sources() {
+        let mut e = ScrollEngine {
+            enabled: true,
+            active: false,
+            mouse_held: false,
+            kb_held: false,
+            accum: WheelAccum::default(),
+            trigger: TriggerBtn::X1,
+            kb_trigger: Some(KbTrigger { vk: 0xA4 }),
+            px_per_notch: SCROLL_PX_DEFAULT,
+        };
+        // 鼠标按住 → 激活
+        e.mouse_held = true;
+        e.sync_active();
+        assert!(e.active);
+        e.mouse_held = false;
+        e.sync_active();
+        assert!(!e.active);
+        // 键盘按住（调用方已保证单独） → 激活
+        e.kb_held = true;
+        e.sync_active();
+        assert!(e.active);
+        // 未启用则强制关闭
+        e.enabled = false;
+        e.sync_active();
+        assert!(!e.active);
     }
 }

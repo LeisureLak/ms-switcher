@@ -51,7 +51,7 @@ use windows::core::w;
 
 use crate::menu_model::{
     self, CHECK_W, EFF_INFO_H, EffectiveInfo, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H,
-    RULE_ICON_W, SEP_H, SLIDER_H, SUB_W, TITLE_H, TOP_PAD, autostart_row_top, device_row_top,
+    RULE_ICON_W, SEP_H, SLIDER_H, TITLE_H, TOP_PAD, autostart_row_top, device_row_top,
     eff_row_top, exit_row_top, hover_at, menu_height, reset_btn_rect, wheel_label_top,
     wheel_slider_top,
 };
@@ -355,8 +355,8 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
         });
     }
     let h_dip = menu_height(state.model.devs.len());
-    // 按「菜单+子菜单」全宽夹取，保证子菜单在右/左展开都不出屏
-    let (x, y) = clamp_to_work_area(pt, (MENU_W + SUB_W) * s, h_dip * s);
+    // 主菜单按自身宽度夹取；子菜单放不下时由 submenu 自行翻转到左缘
+    let (x, y) = clamp_to_work_area(pt, MENU_W * s, h_dip * s);
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -1075,19 +1075,29 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                     scroll,
                 } = info;
                 let wheel_str = wheel.map_or("保持".to_string(), |w| w.to_string());
-                let (scroll_on, scroll_trigger, scroll_px) = scroll
+                let (scroll_on, scroll_trigger, scroll_kb, scroll_px) = scroll
                     .as_ref()
-                    .map_or((false, TriggerBtn::X1, SCROLL_PX_DEFAULT), |s| {
-                        (s.enabled, s.trigger, s.px_per_notch)
-                    });
+                    .map_or(
+                        (false, TriggerBtn::X1, None, SCROLL_PX_DEFAULT),
+                        |s| {
+                            (
+                                s.enabled,
+                                s.trigger,
+                                s.kb_trigger,
+                                s.px_per_notch,
+                            )
+                        },
+                    );
+                let kb_label = scroll_kb
+                    .map_or("无".to_string(), |k| format!("键盘 {}", k.label()));
                 let scroll_line = if scroll_on {
                     format!(
-                        "滚轮模式: 开 · {} · {scroll_px} 像素/齿",
+                        "滚轮模式: 开 · {} · {kb_label} · {scroll_px} 像素/齿",
                         scroll_trigger.label()
                     )
                 } else {
                     format!(
-                        "滚轮模式: 关 · {} · {scroll_px} 像素/齿",
+                        "滚轮模式: 关 · {} · {kb_label} · {scroll_px} 像素/齿",
                         scroll_trigger.label()
                     )
                 };

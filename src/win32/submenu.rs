@@ -39,9 +39,10 @@ use windows::core::w;
 
 use crate::menu_model::{
     DevRow, Hover, MENU_W, MenuAction, PAD, SUB_INFO_TOP, SUB_ROW_H, SUB_W, sub_action_top,
-    sub_btn_at, sub_btn_rect, sub_height, sub_ptr_label_top, sub_row_at, sub_scroll_mode_at,
-    sub_scroll_mode_top, sub_scroll_sens_label_top, sub_scroll_sens_rect, sub_scroll_trigger_at,
-    sub_scroll_trigger_top, sub_slider_rect, sub_wheel_label_top, sub_wheel_rect,
+    sub_btn_at, sub_btn_rect, sub_height, sub_kb_trigger_at, sub_kb_trigger_top, sub_ptr_label_top,
+    sub_row_at, sub_scroll_mode_at, sub_scroll_mode_top, sub_scroll_sens_label_top,
+    sub_scroll_sens_rect, sub_scroll_trigger_at, sub_scroll_trigger_top, sub_slider_rect,
+    sub_wheel_label_top, sub_wheel_rect,
 };
 use crate::scroll::{SCROLL_PX_DEFAULT, SCROLL_PX_MAX, SCROLL_PX_MIN};
 
@@ -351,13 +352,17 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             let state = &mut *ptr;
             state.model.sub_pointer_inside = true;
             let (x, y) = dip_from_lp(hwnd, lp);
-            // 悬停槽位：0..2 = 操作行，3 = 「设为规则」按钮，4 = 滚轮模式勾选，5 = 触发键
+            // 悬停槽位：0..2 = 操作行，3 = 「设为规则」按钮，4 = 滚轮模式勾选，
+            // 5 = 鼠标触发键，6 = 键盘触发键
             let mut slot = sub_row_at(y).or_else(|| sub_btn_at(x, y).then_some(3));
             if slot.is_none() && sub_scroll_mode_at(x, y) {
                 slot = Some(4);
             }
             if slot.is_none() && sub_scroll_trigger_at(x, y) {
                 slot = Some(5);
+            }
+            if slot.is_none() && sub_kb_trigger_at(x, y) {
+                slot = Some(6);
             }
             if slot != state.sub_hover_row {
                 state.sub_hover_row = slot;
@@ -405,12 +410,15 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             if slot.is_none() && sub_scroll_trigger_at(x, y) {
                 slot = Some(5);
             }
+            if slot.is_none() && sub_kb_trigger_at(x, y) {
+                slot = Some(6);
+            }
             let enabled = match (state.sub_dev, slot) {
                 (Some(dev), Some(s)) => {
                     let d = state.model.devs.get(dev);
                     match s {
                         3 => d.map(|d| d.can_rule()).unwrap_or(false),
-                        4 | 5 => d.map(|d| d.can_rule()).unwrap_or(false),
+                        4 | 5 | 6 => d.map(|d| d.can_rule()).unwrap_or(false),
                         _ => d.map(|d| d.sub_actions()[s].1).unwrap_or(false),
                     }
                 }
@@ -475,6 +483,9 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             if slot.is_none() && sub_scroll_trigger_at(x, y) {
                 slot = Some(5);
             }
+            if slot.is_none() && sub_kb_trigger_at(x, y) {
+                slot = Some(6);
+            }
             let pressed = state.sub_pressed.take();
             let _ = InvalidateRect(Some(hwnd), None, false);
             if pressed.is_some() && pressed == slot {
@@ -524,10 +535,19 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                             }
                         }
                         5 => {
-                            // 触发键录入：仅在滚轮模式启用时
+                            // 鼠标触发键录入：仅在滚轮模式启用时
                             let on = state.model.sub_scroll.as_ref().map_or(false, |s| s.enabled);
                             if on && !state.model.capturing {
                                 super::scroll_hook::arm_capture(state);
+                                state.model.capturing = true;
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                            }
+                        }
+                        6 => {
+                            // 键盘触发键录入：仅在滚轮模式启用时
+                            let on = state.model.sub_scroll.as_ref().map_or(false, |s| s.enabled);
+                            if on && !state.model.capturing {
+                                super::scroll_hook::arm_kb_capture(state);
                                 state.model.capturing = true;
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
@@ -688,7 +708,8 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
                     };
                     FillRect(mem, &rr, CreateSolidBrush(fill));
                 }
-                let trig_text = if state.model.capturing {
+                let kb_capturing = super::scroll_hook::is_kb_capturing();
+                let trig_text = if state.model.capturing && !kb_capturing {
                     "触发键: 按下任意鼠标键…(Esc取消)".to_string()
                 } else {
                     let t = scroll.map_or(crate::scroll::TriggerBtn::X1, |s| s.trigger);
@@ -701,6 +722,48 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
                     trigger_top + SUB_ROW_H / 2.0,
                     s,
                     trig_color,
+                );
+
+                // ── 键盘触发键行 ──
+                let kb_top = sub_kb_trigger_top();
+                let kb_hovered = d.can_rule() && scroll_enabled && state.sub_hover_row == Some(6);
+                let kb_pressed = d.can_rule() && scroll_enabled && state.sub_pressed == Some(6);
+                let kb_color = if !d.can_rule() || !scroll_enabled {
+                    pal.gray
+                } else if kb_hovered || kb_pressed {
+                    pal.hl_text
+                } else {
+                    pal.text
+                };
+                if kb_hovered || kb_pressed {
+                    let fill = if kb_pressed {
+                        pal.row_pressed
+                    } else {
+                        pal.highlight
+                    };
+                    let rr = RECT {
+                        left: (1.0 * s).round() as i32,
+                        top: (kb_top * s).round() as i32,
+                        right: (((SUB_W - 1.0) * s).round() as i32).min(w),
+                        bottom: ((kb_top + SUB_ROW_H) * s).round() as i32,
+                    };
+                    FillRect(mem, &rr, CreateSolidBrush(fill));
+                }
+                let kb_text = if state.model.capturing && kb_capturing {
+                    "键盘触发: 按下单个键…(Esc取消)".to_string()
+                } else {
+                    match scroll.and_then(|s| s.kb_trigger) {
+                        Some(t) => format!("键盘触发: {}", t.label()),
+                        None => "键盘触发: 无".to_string(),
+                    }
+                };
+                draw_text(
+                    mem,
+                    &kb_text,
+                    PAD,
+                    kb_top + SUB_ROW_H / 2.0,
+                    s,
+                    kb_color,
                 );
 
                 // ── 滚动灵敏度标签 ──
