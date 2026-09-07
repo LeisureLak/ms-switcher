@@ -32,8 +32,10 @@ use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW,
     GetWindowRect, HMENU, PostMessageW, SW_SHOWNA, SendMessageW, SetWindowLongPtrW, ShowWindow,
-    WM_ERASEBKGND, WM_HSCROLL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
-    WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WM_ERASEBKGND, WM_HSCROLL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_NOTIFY, WM_PAINT,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::w;
 
@@ -49,7 +51,7 @@ use crate::scroll::{SCROLL_PX_DEFAULT, SCROLL_PX_MAX, SCROLL_PX_MIN};
 use super::host::{HostState, WM_APP_CLOSE_SUBMENU};
 use super::menu::{
     SUB_CLASS, apply_dwm, current_pal, dip_from_lp, dpi_scale, draw_check, draw_text,
-    draw_text_center, register_class, trackbar_proc,
+    draw_text_center, register_class, trackbar_notify, trackbar_proc, trackbar_theme,
 };
 
 /// TBM_GETPOS 未包含在 windows crate 绑定中，值为 WM_USER（与 menu.rs 一致）。
@@ -122,7 +124,7 @@ fn open(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             SUB_CLASS,
             w!("MSS SubMenu"),
-            WS_POPUP,
+            WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             x,
             y,
             sub_w,
@@ -265,6 +267,10 @@ fn open(
             5,
             state.hwnd.0 as usize,
         );
+
+        trackbar_theme(tb, state.theme_dark, state.hc);
+        trackbar_theme(tb_wh, state.theme_dark, state.hc);
+        trackbar_theme(tb_scroll, state.theme_dark, state.hc);
     }
     state.sub_trackbar = Some(tb);
     state.sub_wheel_trackbar = Some(tb_wh);
@@ -574,6 +580,10 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                 }
             }
             LRESULT(0)
+        }
+        WM_NOTIFY => {
+            // Trackbar 自绘（NM_CUSTOMDRAW）
+            trackbar_notify(&*ptr, lp).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }

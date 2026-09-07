@@ -22,19 +22,21 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT,
     DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawFocusRect, DrawTextW,
     Ellipse, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect, GetStockObject, HDC, HFONT,
-    InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID,
-    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_SOLID, RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{
-    ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TBM_SETPOS, TBM_SETRANGE,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT,
+    CDIS_DISABLED, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NMCUSTOMDRAW,
+    NMHDR, NM_CUSTOMDRAW, SetWindowTheme, TBM_SETPOS, TBM_SETRANGE, TBCD_CHANNEL, TBCD_THUMB,
     TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASS, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SPACE, VK_UP,
+    IsWindowEnabled, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE,
+    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging as win;
@@ -42,12 +44,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect,
     GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, HMENU,
     IDC_ARROW, LoadCursorW, PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CHILD, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 use crate::menu_model::{
     self, CHECK_W, EFF_INFO_H, EffectiveInfo, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H,
@@ -202,6 +205,81 @@ pub(crate) fn apply_dwm(hwnd: HWND, pal: &Pal) {
     }
 }
 
+/// 给 Trackbar 子控件应用当前主题（暗色/高对比度/浅色）。
+/// 由于 UxTheme 不保证 msctls_trackbar32 有暗色变体，这里只做主题重置并触发重绘；
+/// 真正的绘制由父窗口的 `NM_CUSTOMDRAW` 自绘接管。
+pub(crate) fn trackbar_theme(tb: HWND, _dark: bool, _hc: bool) {
+    unsafe {
+        let _ = SetWindowTheme(tb, None::<&PCWSTR>, None::<&PCWSTR>);
+        let _ = SendMessageW(tb, win::WM_THEMECHANGED, Some(WPARAM(0)), Some(LPARAM(0)));
+    }
+}
+
+/// Trackbar 自绘：暗色/浅色/高对比度下都由我们绘制通道和滑块，
+/// 这样就不用依赖 UxTheme 是否给 msctls_trackbar32 提供了暗色变体。
+pub(crate) unsafe fn trackbar_custom_draw(pal: &Pal, nmc: &NMCUSTOMDRAW) -> LRESULT {
+    if nmc.dwDrawStage == CDDS_PREPAINT {
+        // CDDS_PREPAINT 的 rc 为空，需要自己取客户区并把整个控件背景填成菜单背景色
+        let mut client = RECT::default();
+        let _ = GetClientRect(nmc.hdr.hwndFrom, &mut client);
+        let bg = CreateSolidBrush(pal.bg);
+        let _ = FillRect(nmc.hdc, &client, bg);
+        let _ = DeleteObject(bg.into());
+        return LRESULT((CDRF_NOTIFYITEMDRAW | CDRF_SKIPDEFAULT) as isize);
+    }
+    if nmc.dwDrawStage == CDDS_ITEMPREPAINT {
+        let hdc = nmc.hdc;
+        let rc = nmc.rc;
+        let enabled = IsWindowEnabled(nmc.hdr.hwndFrom).as_bool();
+        let disabled = nmc.uItemState.contains(CDIS_DISABLED);
+
+        if nmc.dwItemSpec == TBCD_CHANNEL as usize {
+            let brush = CreateSolidBrush(pal.border);
+            let null_pen = GetStockObject(NULL_PEN);
+            let old_pen = SelectObject(hdc, null_pen);
+            let old_brush = SelectObject(hdc, brush.into());
+            let h = rc.bottom - rc.top;
+            let _ = RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, h, h);
+            let _ = SelectObject(hdc, old_brush);
+            let _ = SelectObject(hdc, old_pen);
+            let _ = DeleteObject(brush.into());
+        } else if nmc.dwItemSpec == TBCD_THUMB as usize {
+            let thumb = if enabled && !disabled { pal.highlight } else { pal.gray };
+            let brush = CreateSolidBrush(thumb);
+            let null_pen = GetStockObject(NULL_PEN);
+            let old_pen = SelectObject(hdc, null_pen);
+            let old_brush = SelectObject(hdc, brush.into());
+            let _ = Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
+            let _ = SelectObject(hdc, old_brush);
+            let _ = SelectObject(hdc, old_pen);
+            let _ = DeleteObject(brush.into());
+        }
+        return LRESULT(CDRF_SKIPDEFAULT as isize);
+    }
+    LRESULT(CDRF_DODEFAULT as isize)
+}
+
+/// 如果 WM_NOTIFY 来自某个 Trackbar 的 NM_CUSTOMDRAW，返回自绘结果。
+pub(crate) unsafe fn trackbar_notify(state: &HostState, lp: LPARAM) -> Option<LRESULT> {
+    let nm = &*(lp.0 as *const NMHDR);
+    if nm.code != NM_CUSTOMDRAW {
+        return None;
+    }
+    let tbs = [
+        state.trackbar,
+        state.wheel_trackbar,
+        state.sub_trackbar,
+        state.sub_wheel_trackbar,
+        state.sub_scroll_trackbar,
+    ];
+    if tbs.iter().any(|h| h.map(|x| x == nm.hwndFrom).unwrap_or(false)) {
+        let nmc = &*(lp.0 as *const NMCUSTOMDRAW);
+        Some(trackbar_custom_draw(&current_pal(state), nmc))
+    } else {
+        None
+    }
+}
+
 /// 绘制用调色板：高对比度优先，否则按主题暗色标志。
 pub(crate) fn current_pal(state: &HostState) -> Pal {
     if state.hc {
@@ -339,7 +417,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             MENU_CLASS,
             w!("MSS Menu"),
-            WS_POPUP,
+            WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             pt.x,
             pt.y,
             0,
@@ -385,7 +463,9 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             WINDOW_EX_STYLE(0),
             TRACKBAR_CLASS,
             w!(""),
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            WS_CHILD
+                | WS_VISIBLE
+                | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
             px(hwnd, PAD),
             px(hwnd, TOP_PAD + TITLE_H),
             px(hwnd, MENU_W - 2.0 * PAD),
@@ -401,7 +481,9 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             WINDOW_EX_STYLE(0),
             TRACKBAR_CLASS,
             w!(""),
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            WS_CHILD
+                | WS_VISIBLE
+                | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
             px(hwnd, PAD),
             px(hwnd, wheel_slider_top()),
             px(hwnd, MENU_W - 2.0 * PAD),
@@ -439,6 +521,9 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             Some(LPARAM(state.model.wheel_val as isize)),
         );
         let _ = SetWindowSubclass(tb_wheel, Some(trackbar_proc), 2, state.hwnd.0 as usize);
+
+        trackbar_theme(tb, state.theme_dark, state.hc);
+        trackbar_theme(tb_wheel, state.theme_dark, state.hc);
     }
     state.trackbar = Some(tb);
     state.wheel_trackbar = Some(tb_wheel);
@@ -687,6 +772,10 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             }
             LRESULT(0)
         }
+        WM_NOTIFY => {
+            // Trackbar 自绘（NM_CUSTOMDRAW）
+            trackbar_notify(&*ptr, lp).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
+        }
         WM_HSCROLL => {
             // lp = 发送通知的 Trackbar 子控件 HWND；wParam 低字 = 通知码
             let state = &mut *ptr;
@@ -732,6 +821,11 @@ pub(crate) unsafe extern "system" fn trackbar_proc(
     uid: usize,
     data: usize,
 ) -> LRESULT {
+    // 背景由 NM_CUSTOMDRAW 的 CDDS_PREPAINT 阶段填充；
+    // 禁止系统默认的浅色/主题背景擦除，避免闪烁。
+    if msg == WM_ERASEBKGND {
+        return LRESULT(1);
+    }
     if uid == 3 || uid == 4 || uid == 5 {
         if msg == WM_MOUSEMOVE {
             let mut tme = TRACKMOUSEEVENT {

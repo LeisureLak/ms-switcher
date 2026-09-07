@@ -434,6 +434,31 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             if cur != state.model.speed_val || cur_wheel != state.model.wheel_val {
                 sync_tip(state);
             }
+
+            // 同时刷新系统暗色/高对比度并应用给已打开的菜单/滑块
+            let new_dark = menu::system_dark();
+            let new_hc = menu::high_contrast();
+            if new_dark != state.theme_dark || new_hc != state.hc {
+                state.theme_dark = new_dark;
+                state.hc = new_hc;
+                let pal = menu::current_pal(state);
+                for h in [state.menu, state.sub, state.other_sub].into_iter().flatten() {
+                    menu::apply_dwm(h, &pal);
+                }
+                for tb in [
+                    state.trackbar,
+                    state.wheel_trackbar,
+                    state.sub_trackbar,
+                    state.sub_wheel_trackbar,
+                    state.sub_scroll_trackbar,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    menu::trackbar_theme(tb, new_dark, new_hc);
+                }
+                invalidate_menus(state);
+            }
             LRESULT(0)
         }
         WM_CLOSE => {
