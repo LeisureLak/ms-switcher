@@ -37,6 +37,10 @@ fn default_speed() -> u32 {
 pub struct Config {
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// 全局滚轮模式配置：无规则生效时生效；规则生效期间停用。
+    /// 沿用旧版顶层 `scroll` 字段名，旧配置中的该字段自动恢复生效。
+    #[serde(default)]
+    pub scroll: Option<ScrollCfg>,
 }
 
 impl Rule {

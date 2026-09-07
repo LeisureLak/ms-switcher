@@ -105,6 +105,11 @@ pub struct HostState {
     pub sub: Option<HWND>,
     /// 子菜单对应的设备全局索引。
     pub sub_dev: Option<usize>,
+    /// 主菜单内的全局滚轮模式灵敏度 Trackbar。
+    pub scroll_px_trackbar: Option<HWND>,
+    /// 当前触发键录入目标是否为全局滚轮模式（主菜单内联区）；
+    /// false = 设备子菜单录入（结果写 model.sub_scroll 本地预览）。
+    pub capture_global: bool,
     /// 子菜单内悬停的操作行（None = 信息行/无）。
     pub sub_hover_row: Option<usize>,
     /// 其他设备列表子菜单窗口。
@@ -153,6 +158,8 @@ impl HostState {
             font: windows::Win32::Graphics::Gdi::HFONT::default(),
             sub: None,
             sub_dev: None,
+            scroll_px_trackbar: None,
+            capture_global: false,
             sub_hover_row: None,
             other_sub: None,
             other_sub_hover: None,
@@ -322,42 +329,61 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_APP_KB_SCROLL_CHANGED => {
-            // 键盘触发键录入结束（子菜单；wParam 1=已录入(lp=归一化vk) 0=取消）
+            // 键盘触发键录入结束（wParam 1=已录入(lp=归一化vk) 0=取消）；
+            // 结果去向：主菜单内联全局区（capture_global）→ 直接写 cfg.scroll；
+            // 设备子菜单 → 写 model.sub_scroll 本地预览。
             if wp.0 == 1 {
                 let vk = lp.0 as u32;
-                match &mut state.model.sub_scroll {
-                    Some(s) => s.kb_trigger = Some(crate::scroll::KbTrigger { vk }),
-                    None => {
-                        state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
-                            enabled: true,
-                            trigger: crate::scroll::TriggerBtn::X1,
-                            kb_trigger: Some(crate::scroll::KbTrigger { vk }),
-                            px_per_line: crate::scroll::SCROLL_PX_DEFAULT,
-                        });
+                if state.capture_global {
+                    state.app.update_global_scroll(|c| {
+                        c.kb_trigger = Some(crate::scroll::KbTrigger { vk });
+                    });
+                    let _ = crate::config::save(&state.app.cfg);
+                    state.model.refresh_effective(&state.app);
+                    scroll_hook::sync(state);
+                } else {
+                    match &mut state.model.sub_scroll {
+                        Some(s) => s.kb_trigger = Some(crate::scroll::KbTrigger { vk }),
+                        None => {
+                            state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
+                                enabled: true,
+                                trigger: crate::scroll::TriggerBtn::X1,
+                                kb_trigger: Some(crate::scroll::KbTrigger { vk }),
+                                px_per_line: crate::scroll::SCROLL_PX_DEFAULT,
+                            });
+                        }
                     }
                 }
                 if state.debug {
                     eprintln!("[mss-debug] kb scroll trigger captured: vk={:#04x}", vk);
                 }
             }
+            state.capture_global = false;
             state.model.capturing = scroll_hook::is_capturing();
             scroll_hook::sync_kb_hook(state);
             invalidate_menus(state);
             LRESULT(0)
         }
         WM_APP_SCROLL_CHANGED => {
-            // 鼠标触发键录入结束（子菜单；wParam 1=已录入(lp=键码) 0=取消）
+            // 鼠标触发键录入结束（wParam 1=已录入(lp=键码) 0=取消）；去向同上。
             if wp.0 == 1 {
                 if let Some(t) = crate::scroll::TriggerBtn::from_code(lp.0 as u32) {
-                    match &mut state.model.sub_scroll {
-                        Some(s) => s.trigger = t,
-                        None => {
-                            state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
-                                enabled: true,
-                                trigger: t,
-                                kb_trigger: None,
-                                px_per_line: crate::scroll::SCROLL_PX_DEFAULT,
-                            });
+                    if state.capture_global {
+                        state.app.update_global_scroll(|c| c.trigger = t);
+                        let _ = crate::config::save(&state.app.cfg);
+                        state.model.refresh_effective(&state.app);
+                        scroll_hook::sync(state);
+                    } else {
+                        match &mut state.model.sub_scroll {
+                            Some(s) => s.trigger = t,
+                            None => {
+                                state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
+                                    enabled: true,
+                                    trigger: t,
+                                    kb_trigger: None,
+                                    px_per_line: crate::scroll::SCROLL_PX_DEFAULT,
+                                });
+                            }
                         }
                     }
                     if state.debug {
@@ -365,6 +391,7 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     }
                 }
             }
+            state.capture_global = false;
             state.model.capturing = scroll_hook::is_capturing();
             invalidate_menus(state);
             LRESULT(0)
@@ -414,15 +441,24 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         win::WM_SETTINGCHANGE => {
             // 系统设置改了指针/滚轮速度 → 同步滑块/菜单/tooltip
             let cur = speed::get();
-            if cur != state.model.speed_val {
+            let cur_wheel = speed::get_wheel();
+            // 与本程序最后应用值不同 → 外部修改（如 Windows 设置），
+            // 当前生效规则失效（连带关闭其滚轮模式）；自身写入的广播回环被过滤
+            if state.app.on_speed_observed(cur, cur_wheel) {
+                state.model.refresh_effective(&state.app);
+                scroll_hook::sync(state);
+                invalidate_menus(state);
+            }
+            let speed_changed = cur != state.model.speed_val;
+            let wheel_changed = cur_wheel != state.model.wheel_val;
+            if speed_changed {
                 state.model.speed_val = cur;
                 if let Some(tb) = state.trackbar {
                     SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur as isize)));
                 }
                 invalidate_menus(state);
             }
-            let cur_wheel = speed::get_wheel();
-            if cur_wheel != state.model.wheel_val {
+            if wheel_changed {
                 state.model.wheel_val = cur_wheel;
                 if let Some(tb) = state.wheel_trackbar {
                     SendMessageW(
@@ -434,7 +470,7 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 }
                 invalidate_menus(state);
             }
-            if cur != state.model.speed_val || cur_wheel != state.model.wheel_val {
+            if speed_changed || wheel_changed {
                 sync_tip(state);
             }
 
@@ -643,6 +679,8 @@ pub fn close_menu(state: &mut HostState) {
     if let Some(h) = state.menu.take() {
         state.trackbar = None;
         state.wheel_trackbar = None;
+        state.scroll_px_trackbar = None;
+        state.capture_global = false;
         state.sub_trackbar = None;
         state.sub_wheel_trackbar = None;
         state.sub_scroll_trackbar = None;
@@ -688,10 +726,12 @@ pub fn close_menu(state: &mut HostState) {
 fn debounced_scan(state: &mut HostState) {
     let mice = devices::enumerate_mice();
     state.app.apply_diff(&mice);
+    // 插入/拔出可能改变生效规则 → 同步滚轮模式钩子
+    scroll_hook::sync(state);
     let devs = menu_model::build_dev_rows(&mice, &state.app);
     let changed = state.model.devs.len() != devs.len();
     state.model.set_devs(devs);
-    state.model.effective = menu_model::effective_info(&state.app);
+    state.model.refresh_effective(&state.app);
     if state.debug {
         eprintln!("[mss-debug] dev scan: {} mice", mice.len());
     }

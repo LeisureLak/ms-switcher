@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::config::{Config, Rule};
 use crate::devices::{self, Device};
+use crate::scroll::ScrollCfg;
 use crate::speed;
 
 /// 应用层状态：跟踪当前插入的鼠标、被规则命中的设备在插入前的速度。
@@ -15,6 +16,9 @@ pub struct AppState {
     applied_speed: u32,
     /// 程序内存中最后应用的滚轮速度。
     applied_wheel: u32,
+    /// 手动调速（菜单滑块/恢复默认/键盘 ←/→/外部修改）后置位：
+    /// 当前没有任何规则生效，直到下一次规则应用/激活/恢复。
+    overridden: bool,
 }
 
 impl AppState {
@@ -26,6 +30,7 @@ impl AppState {
             saved: HashMap::new(),
             applied_speed: speed::get(),
             applied_wheel: speed::get_wheel(),
+            overridden: false,
         };
         for dev in devices::enumerate_mice() {
             s.on_device_inserted(&dev);
@@ -57,6 +62,7 @@ impl AppState {
                 self.applied_wheel = w;
                 speed::set_wheel(w);
             }
+            self.overridden = false;
         }
     }
 
@@ -83,15 +89,40 @@ impl AppState {
                 self.applied_wheel = w;
                 speed::set_wheel(w);
             }
+            self.overridden = false;
         }
     }
 
     /// 当前生效的规则设备（active 中最后插入的规则设备）及其规则。
+    /// 手动调速或外部改速后（overridden）视为无规则生效。
     pub fn effective_rule(&self) -> Option<(&Device, &Rule)> {
+        if self.overridden {
+            return None;
+        }
         self.active
             .iter()
             .rev()
             .find_map(|(_, d)| self.rule_for(d).map(|r| (d, r)))
+    }
+
+    /// 当前应使用的滚轮模式配置：规则生效期间用规则的配置（规则没配 = 关闭），
+    /// 无规则生效（含手动调速失效后）回落到全局配置 `cfg.scroll`。
+    /// 返回 None = 滚轮模式整体关闭。
+    pub fn effective_scroll(&self) -> Option<ScrollCfg> {
+        let s = match self.effective_rule() {
+            Some((_, r)) => r.scroll.clone(),
+            None => self.cfg.scroll.clone(),
+        };
+        s.filter(|s| s.enabled)
+    }
+
+    /// 更新全局滚轮模式配置的单个字段（主菜单内联滚轮模式区）：
+    /// 无配置时先建默认配置再改。视为手动调节全局配置 → 当前生效规则失效。
+    pub fn update_global_scroll(&mut self, f: impl FnOnce(&mut ScrollCfg)) {
+        let mut c = self.cfg.scroll.clone().unwrap_or_default();
+        f(&mut c);
+        self.cfg.scroll = Some(c);
+        self.overridden = true;
     }
 
     /// 当前插入的设备中命中规则的个数。
@@ -149,6 +180,7 @@ impl AppState {
         self.saved = new_saved;
         self.applied_speed = cur;
         self.applied_wheel = cur_wheel;
+        self.overridden = false;
     }
 
     /// 手动激活某规则设备：从当前位置取出并重新插入到 active 末尾，
@@ -163,8 +195,9 @@ impl AppState {
             None => return,
         };
 
-        // 已在末尾：等价于当前生效，无需改动
-        if pos == self.active.len() - 1 {
+        // 已在末尾且未被手动调速覆盖：等价于当前生效，无需改动；
+        // overridden 时仍走一遍重新应用，使单击设备行能把规则拉回来
+        if pos == self.active.len() - 1 && !self.overridden {
             return;
         }
 
@@ -184,9 +217,40 @@ impl AppState {
                 self.applied_wheel = w;
                 speed::set_wheel(w);
             }
+            self.overridden = false;
         }
 
         self.active.push((id, dev));
+    }
+
+    /// 手动调指针速度（菜单滑块/恢复默认/键盘调速）：写系统并使当前规则失效。
+    /// `saved` 恢复基线不受影响——拔出设备仍按插入/激活时记录的速度恢复。
+    pub fn set_speed_manual(&mut self, v: u32) {
+        let v = v.clamp(1, 20);
+        speed::set(v);
+        self.applied_speed = v;
+        self.overridden = true;
+    }
+
+    /// 手动调滚轮速度：同 `set_speed_manual`，规则一并失效。
+    pub fn set_wheel_manual(&mut self, v: u32) {
+        let v = v.clamp(speed::WHEEL_MIN, speed::WHEEL_MAX);
+        speed::set_wheel(v);
+        self.applied_wheel = v;
+        self.overridden = true;
+    }
+
+    /// WM_SETTINGCHANGE 观察到的系统速度：与本程序最后应用值不同 →
+    /// 外部修改（如 Windows 设置），规则失效。本程序自身写入的广播回环
+    /// 会因值相等被过滤。返回是否发生了外部修改。
+    pub fn on_speed_observed(&mut self, cur_speed: u32, cur_wheel: u32) -> bool {
+        if cur_speed == self.applied_speed && cur_wheel == self.applied_wheel {
+            return false;
+        }
+        self.applied_speed = cur_speed;
+        self.applied_wheel = cur_wheel;
+        self.overridden = true;
+        true
     }
 }
 
@@ -248,6 +312,7 @@ mod tests {
         let original_wheel = speed::get_wheel();
         let cfg = Config {
             rules: vec![rule("056E", "01C5", 4)],
+            scroll: None,
         };
         let st = AppState {
             cfg,
@@ -255,6 +320,7 @@ mod tests {
             saved: HashMap::new(),
             applied_speed: original,
             applied_wheel: original_wheel,
+            overridden: false,
         };
         (st, original, original_wheel, SpeedGuard(original, original_wheel, lock))
     }
@@ -427,5 +493,122 @@ mod tests {
         st.apply_diff(&[]);
         assert_eq!(st.applied_speed, 7);
         assert_eq!(st.applied_wheel, original_wheel);
+    }
+
+    #[test]
+    fn manual_speed_change_invalidates_effective_rule() {
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+        assert_eq!(st.applied_speed, 4);
+        assert!(st.effective_rule().is_some());
+
+        // 手动调指针速度 → 规则失效；saved 基线不受影响
+        st.set_speed_manual(10);
+        assert_eq!(speed::get(), 10);
+        assert!(st.effective_rule().is_none());
+        assert_eq!(st.saved.get("ID-A"), Some(&(original, original_wheel)));
+
+        // 本程序自身写入的广播回环（观察值 == 已应用值）不算外部修改
+        assert!(!st.on_speed_observed(10, original_wheel));
+        assert!(st.effective_rule().is_none());
+
+        // 单击已在 active 末尾的设备行：overridden 时仍重新应用规则
+        st.activate_rule("ID-A");
+        assert_eq!(speed::get(), 4);
+        assert_eq!(
+            st.effective_rule().map(|(d, _)| d.instance_id.as_str()),
+            Some("ID-A")
+        );
+
+        // 手动调滚轮速度 → 规则同样失效
+        st.set_wheel_manual(20);
+        assert_eq!(speed::get_wheel(), 20);
+        assert!(st.effective_rule().is_none());
+    }
+
+    #[test]
+    fn external_speed_change_invalidates_and_removal_still_restores() {
+        let (mut st, original, original_wheel, _g) = state_with_rule();
+
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+        assert!(st.effective_rule().is_some());
+
+        // 外部修改（如 Windows 设置）→ 规则失效
+        speed::set(12);
+        assert!(st.on_speed_observed(speed::get(), speed::get_wheel()));
+        assert!(st.effective_rule().is_none());
+
+        // 失效后新插入命中规则的设备 → 重新应用规则，恢复生效
+        st.apply_diff(&[dev("ID-A", "056E", "01C5"), dev("ID-B", "056E", "01C5")]);
+        assert_eq!(speed::get(), 4);
+        assert_eq!(
+            st.effective_rule().map(|(d, _)| d.instance_id.as_str()),
+            Some("ID-B")
+        );
+
+        // 失效后拔出 B：回退到剩余规则设备 A（恢复逻辑不变）
+        st.set_speed_manual(9);
+        assert!(st.effective_rule().is_none());
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+        assert_eq!(speed::get(), 4);
+        assert_eq!(
+            st.effective_rule().map(|(d, _)| d.instance_id.as_str()),
+            Some("ID-A")
+        );
+        // 全部拔出：恢复 A 插入时记录的原速
+        st.apply_diff(&[]);
+        assert_eq!(speed::get(), original);
+        assert_eq!(st.applied_wheel, original_wheel);
+    }
+
+    #[test]
+    fn global_scroll_applies_only_when_no_rule_effective() {
+        use crate::scroll::{ScrollCfg, TriggerBtn};
+        let (mut st, _o, _ow, _g) = state_with_rule();
+
+        let global = ScrollCfg {
+            enabled: true,
+            trigger: TriggerBtn::Middle,
+            ..Default::default()
+        };
+        st.cfg.scroll = Some(global.clone());
+
+        // 无规则生效 → 用全局配置
+        assert_eq!(st.effective_scroll(), Some(global.clone()));
+
+        // 规则生效但没配滚轮模式 → 全局完全停用（不回落）
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+        assert!(st.effective_rule().is_some());
+        assert_eq!(st.effective_scroll(), None);
+
+        // 规则配置了滚轮模式 → 用规则的
+        st.cfg.rules[0].scroll = Some(ScrollCfg {
+            enabled: true,
+            trigger: TriggerBtn::Right,
+            ..Default::default()
+        });
+        assert_eq!(
+            st.effective_scroll().map(|s| s.trigger),
+            Some(TriggerBtn::Right)
+        );
+
+        // 手动调速使规则失效 → 回落到全局配置
+        st.set_speed_manual(10);
+        assert!(st.effective_rule().is_none());
+        assert_eq!(st.effective_scroll(), Some(global));
+    }
+
+    #[test]
+    fn update_global_scroll_invalidates_rule() {
+        let (mut st, _o, _ow, _g) = state_with_rule();
+
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+        assert!(st.effective_rule().is_some());
+
+        // 修改全局滚轮模式配置 = 手动调节全局配置 → 规则失效
+        st.update_global_scroll(|c| c.enabled = true);
+        assert!(st.effective_rule().is_none());
+        assert!(st.effective_scroll().is_some());
     }
 }

@@ -145,13 +145,10 @@ pub fn sync(state: &mut HostState) {
     }
 }
 
-/// 取当前生效规则的滚轮模式配置（仅 enabled 时有效）。
+/// 取当前应使用的滚轮模式配置（规则生效期间用规则的，否则用全局的；
+/// 仅 enabled 时有效）。
 fn effective_scroll(state: &HostState) -> Option<ScrollCfg> {
-    state
-        .app
-        .effective_rule()
-        .and_then(|(_, r)| r.scroll.clone())
-        .filter(|s| s.enabled)
+    state.app.effective_scroll()
 }
 
 /// 根据当前生效规则是否需要键盘钩子，安装/卸载 WH_KEYBOARD_LL。

@@ -352,13 +352,51 @@ pub fn wheel_slider_top() -> f32 {
     wheel_label_top() + TITLE_H
 }
 
+/// 全局滚轮模式区「滚轮模式」勾选行 y 起点（点）：紧跟滚轮滑块，
+/// 与滚轮设置同属全局区。
+pub fn scroll_mode_row_top() -> f32 {
+    wheel_slider_top() + SLIDER_H
+}
+
+/// 全局滚轮模式区「触发键」行 y 起点（点）。
+pub fn scroll_trigger_row_top() -> f32 {
+    scroll_mode_row_top() + ROW_H
+}
+
+/// 全局滚轮模式区「键盘触发键」行 y 起点（点）。
+pub fn scroll_kb_trigger_row_top() -> f32 {
+    scroll_trigger_row_top() + ROW_H
+}
+
+/// 全局滚轮模式区「滚动灵敏度」标签行 y 起点（点）。
+pub fn scroll_sens_label_top() -> f32 {
+    scroll_kb_trigger_row_top() + ROW_H
+}
+
+/// 全局滚轮模式区灵敏度 Trackbar 的 y 起点（点）。
+pub fn scroll_sens_slider_top() -> f32 {
+    scroll_sens_label_top() + ROW_H
+}
+
+/// 全局滚轮模式区灵敏度滑块矩形（全宽，DIP）。
+pub fn scroll_sens_slider_rect() -> (f32, f32, f32, f32) {
+    (
+        PAD,
+        scroll_sens_slider_top(),
+        MENU_W - PAD,
+        scroll_sens_slider_top() + SLIDER_H,
+    )
+}
+
 /// 「生效规则」信息行的 y 起点（点）。
 pub fn eff_row_top() -> f32 {
-    wheel_slider_top() + SLIDER_H + SEP_H
+    scroll_sens_slider_top() + SLIDER_H + SEP_H
 }
 
 /// 菜单窗口总高度（点）。
-/// `n_ruled` 为有规则设备的数量；设备区之后固定跟一行「其他设备」入口。
+/// `n_ruled` 为有规则设备的数量；滚轮滑块之后固定跟全局滚轮模式区
+/// （勾选 + 双触发键 + 灵敏度标签 + 灵敏度滑块），设备区之后固定跟
+/// 一行「其他设备」入口。
 pub fn menu_height(n_ruled: usize) -> f32 {
     let dev_rows = if n_ruled == 0 {
         INFO_ROW_H
@@ -369,6 +407,8 @@ pub fn menu_height(n_ruled: usize) -> f32 {
         + TITLE_H
         + SLIDER_H
         + TITLE_H
+        + SLIDER_H
+        + 4.0 * ROW_H
         + SLIDER_H
         + SEP_H
         + EFF_INFO_H
@@ -454,6 +494,12 @@ pub enum RowHit {
     Device(usize),
     /// 「其他设备」入口行。
     OtherDevices,
+    /// 全局滚轮模式区「滚轮模式」勾选行。
+    ScrollMode,
+    /// 全局滚轮模式区「触发键」行。
+    ScrollTrigger,
+    /// 全局滚轮模式区「键盘触发键」行。
+    ScrollKbTrigger,
     Autostart,
     Exit,
     /// 标题/滑块/生效规则行/空白等非命令区域。
@@ -462,6 +508,14 @@ pub enum RowHit {
 
 /// 按菜单内 y 坐标做行命中测试（全行宽）。
 pub fn row_at(y: f32, n_ruled: usize) -> RowHit {
+    // 全局滚轮模式区三行（勾选 / 触发键 / 键盘触发键），灵敏度行与滑块不可点
+    if y >= scroll_mode_row_top() && y < scroll_sens_label_top() {
+        return match ((y - scroll_mode_row_top()) / ROW_H).floor() as i32 {
+            0 => RowHit::ScrollMode,
+            1 => RowHit::ScrollTrigger,
+            _ => RowHit::ScrollKbTrigger,
+        };
+    }
     let top = device_row_top(0);
     if n_ruled > 0 && y >= top && y < other_row_top(n_ruled) {
         let i = ((y - top) / ROW_H).floor();
@@ -505,6 +559,12 @@ pub enum Hover {
     Device(usize),
     /// 「其他设备」入口行。
     OtherDevices,
+    /// 全局滚轮模式区「滚轮模式」勾选行。
+    ScrollMode,
+    /// 全局滚轮模式区「触发键」行。
+    ScrollTrigger,
+    /// 全局滚轮模式区「键盘触发键」行。
+    ScrollKbTrigger,
     Autostart,
     Exit,
 }
@@ -518,6 +578,9 @@ pub fn hover_at(x: f32, y: f32, n_ruled: usize) -> Option<Hover> {
     match row_at(y, n_ruled) {
         RowHit::Device(i) => Some(Hover::Device(i)),
         RowHit::OtherDevices => Some(Hover::OtherDevices),
+        RowHit::ScrollMode => Some(Hover::ScrollMode),
+        RowHit::ScrollTrigger => Some(Hover::ScrollTrigger),
+        RowHit::ScrollKbTrigger => Some(Hover::ScrollKbTrigger),
         RowHit::Autostart => Some(Hover::Autostart),
         RowHit::Exit => Some(Hover::Exit),
         RowHit::Other => None,
@@ -541,6 +604,12 @@ pub enum MenuAction {
     Reapply(usize),
     /// 手动激活该规则设备：视为重新插入到 active 末尾。
     ActivateRule(usize),
+    /// 切换全局滚轮模式开关（主菜单内联勾选行）。
+    ToggleGlobalScroll,
+    /// 录入全局滚轮模式鼠标触发键。
+    CaptureGlobalTrigger,
+    /// 录入全局滚轮模式键盘触发键。
+    CaptureGlobalKbTrigger,
     Exit,
 }
 
@@ -563,6 +632,10 @@ pub struct MenuModel {
     pub wheel_val: u32,
     /// 滚轮滑块拖动中的预览值。
     pub pending_wheel: Option<u32>,
+    /// 全局滚轮模式灵敏度（像素/行；跟随 cfg.scroll，无配置时为默认值）。
+    pub global_px: u32,
+    /// 全局灵敏度滑块拖动中的预览值。
+    pub pending_global_px: Option<u32>,
     /// 单设备配置子菜单目标：全局设备索引 + 行的 owner 内 y 起点。Some = 子菜单应显示。
     pub sub_hover: Option<(usize, f32)>,
     /// 单设备配置子菜单指针滑块的本地预览值（纯本地，点「设为规则」才写入规则）。
@@ -599,6 +672,8 @@ impl MenuModel {
             pending_speed: None,
             wheel_val: wheel_val.clamp(1, 100),
             pending_wheel: None,
+            global_px: SCROLL_PX_DEFAULT,
+            pending_global_px: None,
             sub_hover: None,
             sub_slider: None,
             sub_wheel: None,
@@ -618,6 +693,24 @@ impl MenuModel {
         self.devs = devs;
         self.ruled_devs = ruled;
         self.other_devs = other;
+    }
+
+    /// 生效规则变化后调用（不重建设备列表）：刷新生效信息并同步各行勾选。
+    /// 与 `build_dev_rows` 中 `is_effective` 的口径一致：按 VID:PID 匹配。
+    pub fn refresh_effective(&mut self, st: &AppState) {
+        self.effective = effective_info(st);
+        let evp = st.effective_rule().and_then(|(d, _)| {
+            d.vid.as_deref().zip(d.pid.as_deref())
+        });
+        for d in &mut self.devs {
+            d.is_effective = d.rule_speed.is_some()
+                && evp
+                    .map(|(ev, ep)| {
+                        ev == d.vid.as_deref().unwrap_or("")
+                            && ep == d.pid.as_deref().unwrap_or("")
+                    })
+                    .unwrap_or(false);
+        }
     }
 
     /// 有规则设备数量。
@@ -667,6 +760,26 @@ impl MenuModel {
             self.wheel_val = v;
             v
         })
+    }
+
+    /// 全局灵敏度滑块拖动中：只更新预览（夹取 2–200 像素/行）。
+    pub fn preview_global_px(&mut self, v: i32) {
+        self.pending_global_px =
+            Some(v.clamp(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as u32);
+    }
+
+    /// 全局灵敏度滑块松手（语义同 [`MenuModel::commit_speed`]）。
+    pub fn commit_global_px(&mut self) -> Option<u32> {
+        let v = self.pending_global_px.take()?;
+        (v != self.global_px).then(|| {
+            self.global_px = v;
+            v
+        })
+    }
+
+    /// 「滚动灵敏度」标签显示值（拖动中显示预览值）。
+    pub fn display_global_px(&self) -> u32 {
+        self.pending_global_px.unwrap_or(self.global_px)
     }
 
     /// 子菜单滑块预览（夹取 1–20）。
@@ -754,6 +867,9 @@ impl MenuModel {
         }
         match row_at(y, self.ruled_devs.len()) {
             RowHit::Device(local) => vec![MenuAction::ActivateRule(self.ruled_devs[local])],
+            RowHit::ScrollMode => vec![MenuAction::ToggleGlobalScroll],
+            RowHit::ScrollTrigger => vec![MenuAction::CaptureGlobalTrigger],
+            RowHit::ScrollKbTrigger => vec![MenuAction::CaptureGlobalKbTrigger],
             RowHit::Autostart => vec![MenuAction::ToggleAutostart],
             RowHit::Exit => vec![MenuAction::Exit],
             _ => Vec::new(),
@@ -1003,6 +1119,19 @@ mod tests {
         assert_eq!(
             hover_at(60.0, other_row_top(n) + 5.0, n),
             Some(Hover::OtherDevices)
+        );
+        // 全局滚轮模式区三行 hover
+        assert_eq!(
+            hover_at(60.0, scroll_mode_row_top() + 5.0, n),
+            Some(Hover::ScrollMode)
+        );
+        assert_eq!(
+            hover_at(60.0, scroll_trigger_row_top() + 5.0, n),
+            Some(Hover::ScrollTrigger)
+        );
+        assert_eq!(
+            hover_at(60.0, scroll_kb_trigger_row_top() + 5.0, n),
+            Some(Hover::ScrollKbTrigger)
         );
     }
 

@@ -35,8 +35,8 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    IsWindowEnabled, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE,
-    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+    EnableWindow, IsWindowEnabled, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN,
+    VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging as win;
@@ -56,9 +56,10 @@ use crate::menu_model::{
     self, CHECK_W, EFF_INFO_H, EffectiveInfo, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H,
     RULE_ICON_W, SEP_H, SLIDER_H, TITLE_H, TOP_PAD, autostart_row_top, device_row_top,
     eff_row_top, exit_row_top, hover_at, menu_height, other_entry_text, other_row_top,
-    reset_btn_rect, wheel_label_top, wheel_slider_top,
+    reset_btn_rect, scroll_kb_trigger_row_top, scroll_mode_row_top, scroll_sens_label_top,
+    scroll_sens_slider_rect, scroll_trigger_row_top, wheel_label_top, wheel_slider_top,
 };
-use crate::scroll::{SCROLL_PX_DEFAULT, TriggerBtn};
+use crate::scroll::{SCROLL_PX_DEFAULT, SCROLL_PX_MAX, SCROLL_PX_MIN, TriggerBtn};
 
 use super::host::{HostState, WM_APP_CLOSE_MENU, sync_tip};
 
@@ -268,6 +269,7 @@ pub(crate) unsafe fn trackbar_notify(state: &HostState, lp: LPARAM) -> Option<LR
     let tbs = [
         state.trackbar,
         state.wheel_trackbar,
+        state.scroll_px_trackbar,
         state.sub_trackbar,
         state.sub_wheel_trackbar,
         state.sub_scroll_trackbar,
@@ -390,7 +392,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
     state.app.apply_diff(&mice);
     state.model
         .set_devs(menu_model::build_dev_rows(&mice, &state.app));
-    state.model.effective = menu_model::effective_info(&state.app);
+    state.model.refresh_effective(&state.app);
     state.model.speed_val = crate::speed::get();
     state.model.wheel_val = crate::speed::get_wheel();
     state.model.pending_speed = None;
@@ -398,6 +400,14 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
     state.model.sub_slider = None;
     state.model.sub_wheel = None;
     state.model.sub_scroll = None;
+    state.model.global_px = state
+        .app
+        .cfg
+        .scroll
+        .as_ref()
+        .map_or(SCROLL_PX_DEFAULT, |s| s.px_per_line);
+    state.model.pending_global_px = None;
+    state.capture_global = false;
     state.model.autostart_on = crate::autostart::is_enabled();
     state.model.capturing = false;
     state.model.kb_focus = None;
@@ -457,7 +467,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
         state.font = menu_font_for(unsafe { GetDpiForWindow(hwnd) });
     }
 
-    // 滑块子控件（指针 1–20 / 滚轮 1–100）
+    // 滑块子控件（指针 1–20 / 滚轮 1–100 / 全局灵敏度 2–200）
     let tb = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -527,6 +537,54 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
     }
     state.trackbar = Some(tb);
     state.wheel_trackbar = Some(tb_wheel);
+
+    // 全局滚轮模式灵敏度滑块（子类 id 6：Esc/Q 转发，无 leave 通知——
+    // 主菜单自身能收到鼠标事件，不像子菜单需要跨窗口保持）
+    let (xl, xt, xr, xb) = scroll_sens_slider_rect();
+    let tb_px = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            TRACKBAR_CLASS,
+            w!(""),
+            WS_CHILD
+                | WS_VISIBLE
+                | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            px(hwnd, xl),
+            px(hwnd, xt),
+            px(hwnd, xr - xl),
+            px(hwnd, xb - xt),
+            Some(hwnd),
+            Some(HMENU(3 as *mut c_void)),
+            Some(hinstance.into()),
+            None,
+        )?
+    };
+    let scroll_on = state
+        .app
+        .cfg
+        .scroll
+        .as_ref()
+        .map_or(false, |s| s.enabled);
+    unsafe {
+        SendMessageW(
+            tb_px,
+            TBM_SETRANGE,
+            Some(WPARAM(0)),
+            Some(LPARAM(
+                makelong(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as isize
+            )),
+        );
+        SendMessageW(
+            tb_px,
+            TBM_SETPOS,
+            Some(WPARAM(1)),
+            Some(LPARAM(state.model.global_px as isize)),
+        );
+        let _ = EnableWindow(tb_px, scroll_on);
+        let _ = SetWindowSubclass(tb_px, Some(trackbar_proc), 6, state.hwnd.0 as usize);
+        trackbar_theme(tb_px, state.theme_dark, state.hc);
+    }
+    state.scroll_px_trackbar = Some(tb_px);
 
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -708,9 +766,15 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let state = &mut *ptr;
             let (x, y) = dip_from_lp(hwnd, lp);
             state.pressed = match hover_at(x, y, state.model.ruled_devs.len()) {
-                Some(h @ (Hover::Reset | Hover::Autostart | Hover::Exit | Hover::Device(_))) => {
-                    Some(h)
-                }
+                Some(
+                    h @ (Hover::Reset
+                    | Hover::Autostart
+                    | Hover::Exit
+                    | Hover::Device(_)
+                    | Hover::ScrollMode
+                    | Hover::ScrollTrigger
+                    | Hover::ScrollKbTrigger),
+                ) => Some(h),
                 _ => None,
             };
             if state.pressed.is_some() {
@@ -804,6 +868,17 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     .0
                 } as i32;
                 handle_slider_event(state, notify, pos, true);
+            } else if state.scroll_px_trackbar.map(|h| h.0 as isize) == Some(lp.0) {
+                let pos = unsafe {
+                    SendMessageW(
+                        state.scroll_px_trackbar.unwrap(),
+                        TBM_GETPOS,
+                        Some(WPARAM(0)),
+                        Some(LPARAM(0)),
+                    )
+                    .0
+                } as i32;
+                handle_global_px_event(state, notify, pos);
             }
             LRESULT(0)
         }
@@ -968,10 +1043,52 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
         MenuAction::ActivateRule(idx) => {
             if let Some(d) = state.model.devs.get(idx) {
                 state.app.activate_rule(&d.instance_id);
-                state.model.effective = menu_model::effective_info(&state.app);
+                state.model.refresh_effective(&state.app);
                 super::scroll_hook::sync(state);
             }
             false
+        }
+        MenuAction::ToggleGlobalScroll => {
+            // 全局滚轮模式勾选：就地写入配置（视为手动调节全局配置 → 规则失效）
+            state.app.update_global_scroll(|c| c.enabled = !c.enabled);
+            let _ = crate::config::save(&state.app.cfg);
+            let on = state
+                .app
+                .cfg
+                .scroll
+                .as_ref()
+                .map_or(false, |s| s.enabled);
+            if let Some(tb) = state.scroll_px_trackbar {
+                unsafe {
+                    let _ = EnableWindow(tb, on);
+                }
+            }
+            state.model.refresh_effective(&state.app);
+            super::scroll_hook::sync(state);
+            sync_tip(state);
+            invalidate_state(state);
+            true
+        }
+        MenuAction::CaptureGlobalTrigger | MenuAction::CaptureGlobalKbTrigger => {
+            // 全局触发键录入：仅滚轮模式启用时；录入结果经
+            // WM_APP_SCROLL_CHANGED / WM_APP_KB_SCROLL_CHANGED 写回 cfg.scroll
+            let on = state
+                .app
+                .cfg
+                .scroll
+                .as_ref()
+                .map_or(false, |s| s.enabled);
+            if on && !state.model.capturing {
+                state.capture_global = true;
+                if matches!(action, MenuAction::CaptureGlobalTrigger) {
+                    super::scroll_hook::arm_capture(state);
+                } else {
+                    super::scroll_hook::arm_kb_capture(state);
+                }
+                state.model.capturing = true;
+                invalidate_state(state);
+            }
+            true
         }
         MenuAction::Exit => {
             let host = state.hwnd;
@@ -1041,11 +1158,51 @@ fn handle_slider_event(state: &mut HostState, notify: u32, pos: i32, wheel: bool
     }
 }
 
+/// 全局滚轮模式灵敏度滑块事件：语义同 [`handle_slider_event`]
+/// （拖动只预览，松手才应用）。应用 = 写入 `cfg.scroll` 并使当前生效规则失效。
+fn handle_global_px_event(state: &mut HostState, notify: u32, pos: i32) {
+    match notify {
+        TB_THUMBTRACK => {
+            state.model.preview_global_px(pos);
+            invalidate_state(state);
+        }
+        TB_THUMBPOSITION | TB_ENDTRACK => {
+            if let Some(v) = state.model.commit_global_px() {
+                global_px_apply(state, v);
+            } else {
+                state.model.pending_global_px = None;
+                invalidate_state(state);
+            }
+        }
+        TB_LINEUP | TB_LINEDOWN | TB_PAGEUP | TB_PAGEDOWN | TB_TOP | TB_BOTTOM => {
+            let v = pos.clamp(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as u32;
+            state.model.pending_global_px = None;
+            if v != state.model.global_px {
+                global_px_apply(state, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 全局滚动灵敏度落盘：写 `cfg.scroll.px_per_line` 并使当前生效规则失效。
+fn global_px_apply(state: &mut HostState, v: u32) {
+    state.model.global_px = v;
+    state.app.update_global_scroll(|c| c.px_per_line = v);
+    let _ = crate::config::save(&state.app.cfg);
+    state.model.refresh_effective(&state.app);
+    super::scroll_hook::sync(state);
+    sync_tip(state);
+    invalidate_state(state);
+}
+
 /// 指针速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
+/// 手动调速会使当前生效规则失效（连带关闭其滚轮模式）。
 fn speed_set(state: &mut HostState, v: u32) {
-    crate::speed::set(v);
+    state.app.set_speed_manual(v);
     state.model.speed_val = v.clamp(1, 20);
     state.model.pending_speed = None;
+    state.model.refresh_effective(&state.app);
     if let Some(tb) = state.trackbar {
         unsafe {
             SendMessageW(
@@ -1056,14 +1213,18 @@ fn speed_set(state: &mut HostState, v: u32) {
             );
         }
     }
+    super::scroll_hook::sync(state);
     sync_tip(state);
+    invalidate_state(state);
 }
 
 /// 滚轮速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
+/// 手动调速会使当前生效规则失效（连带关闭其滚轮模式）。
 fn wheel_set(state: &mut HostState, v: u32) {
-    crate::speed::set_wheel(v);
+    state.app.set_wheel_manual(v);
     state.model.wheel_val = v.clamp(1, 100);
     state.model.pending_wheel = None;
+    state.model.refresh_effective(&state.app);
     if let Some(tb) = state.wheel_trackbar {
         unsafe {
             SendMessageW(
@@ -1074,7 +1235,9 @@ fn wheel_set(state: &mut HostState, v: u32) {
             );
         }
     }
+    super::scroll_hook::sync(state);
     sync_tip(state);
+    invalidate_state(state);
 }
 
 /// 菜单键盘 ←/→ 的离散调速。
@@ -1199,7 +1362,93 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
             s,
             wheel_color,
         );
-        sep(hdc, wheel_slider_top() + SLIDER_H, s, w, pal.sep);
+        // ── 全局滚轮模式区：滚轮模式勾选 / 触发键 / 键盘触发键 / 灵敏度标签 ──
+        // （灵敏度滑块是真实 Trackbar 子控件，见 open()；布局与子菜单滚轮模式区一致，
+        //   就地操作、即时写入 cfg.scroll 并使当前生效规则失效）
+        let scroll = state.app.cfg.scroll.as_ref();
+        let scroll_on = scroll.map_or(false, |s| s.enabled);
+        let kb_capturing = super::scroll_hook::is_kb_capturing();
+        let capturing_global = state.capture_global && state.model.capturing;
+
+        let g_row = |top: f32, hov: Hover, enabled: bool| {
+            let hovered = enabled && state.hover == Some(hov);
+            let pressed = enabled && state.pressed == Some(hov);
+            draw_row_bg(
+                hdc,
+                top,
+                ROW_H,
+                s,
+                w,
+                hovered,
+                pressed,
+                false,
+                pal.highlight,
+                pal.row_pressed,
+            );
+            if !enabled {
+                pal.gray
+            } else if hovered || pressed {
+                pal.hl_text
+            } else {
+                pal.text
+            }
+        };
+
+        // 滚轮模式勾选行
+        let mode_top = scroll_mode_row_top();
+        let mode_color = g_row(mode_top, Hover::ScrollMode, true);
+        if scroll_on {
+            draw_check(hdc, mode_top + ROW_H / 2.0, s, pal.text);
+        }
+        draw_text(
+            hdc,
+            "滚轮模式",
+            PAD + CHECK_W,
+            mode_top + ROW_H / 2.0,
+            s,
+            mode_color,
+        );
+
+        // 触发键行
+        let trig_top = scroll_trigger_row_top();
+        let trig_color = g_row(trig_top, Hover::ScrollTrigger, scroll_on);
+        let trig_text = if capturing_global && !kb_capturing {
+            "触发键: 按下任意鼠标键…(Esc取消)".to_string()
+        } else {
+            let t = scroll.map_or(TriggerBtn::X1, |s| s.trigger);
+            format!("触发键: {}", t.label())
+        };
+        draw_text(hdc, &trig_text, PAD + CHECK_W, trig_top + ROW_H / 2.0, s, trig_color);
+
+        // 键盘触发键行
+        let kb_top = scroll_kb_trigger_row_top();
+        let kb_color = g_row(kb_top, Hover::ScrollKbTrigger, scroll_on);
+        let kb_text = if capturing_global && kb_capturing {
+            "键盘触发: 按下单个键…(Esc取消)".to_string()
+        } else {
+            match scroll.and_then(|s| s.kb_trigger) {
+                Some(t) => format!("键盘触发: {}", t.label()),
+                None => "键盘触发: 无".to_string(),
+            }
+        };
+        draw_text(hdc, &kb_text, PAD + CHECK_W, kb_top + ROW_H / 2.0, s, kb_color);
+
+        // 滚动灵敏度标签（拖动中灰色预览，与标题行一致）
+        let sens_top = scroll_sens_label_top();
+        let sens_color = if !scroll_on || model.pending_global_px.is_some() {
+            pal.gray
+        } else {
+            pal.text
+        };
+        draw_text(
+            hdc,
+            &format!("滚动灵敏度: {} 像素/行", model.display_global_px()),
+            PAD + CHECK_W,
+            sens_top + ROW_H / 2.0,
+            s,
+            sens_color,
+        );
+        sep(hdc, eff_row_top() - SEP_H, s, w, pal.sep);
 
         // ── 生效规则：三行（规则名 / 两个速度 / 滚轮模式）──
         let eff_y = eff_row_top();
@@ -1373,7 +1622,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         {
             let hovered = state.hover == Some(Hover::Autostart);
             let pressed = state.pressed == Some(Hover::Autostart);
-            let focused = model.kb_focus == Some(n + 1);
+            let focused = model.kb_focus == Some(n + 2);
             let color = if hovered || pressed {
                 pal.hl_text
             } else {
@@ -1411,7 +1660,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         {
             let hovered = state.hover == Some(Hover::Exit);
             let pressed = state.pressed == Some(Hover::Exit);
-            let focused = model.kb_focus == Some(n + 2);
+            let focused = model.kb_focus == Some(n + 3);
             let color = if hovered || pressed {
                 pal.hl_text
             } else {
