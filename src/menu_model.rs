@@ -73,6 +73,20 @@ pub fn build_dev_rows(mice: &[Device], st: &AppState) -> Vec<DevRow> {
         .collect()
 }
 
+/// 把全部设备行拆分为「有规则」与「无规则」的两组全局索引。
+pub fn partition_devs(devs: &[DevRow]) -> (Vec<usize>, Vec<usize>) {
+    let mut ruled = Vec::new();
+    let mut other = Vec::new();
+    for (i, d) in devs.iter().enumerate() {
+        if d.rule_speed.is_some() {
+            ruled.push(i);
+        } else {
+            other.push(i);
+        }
+    }
+    (ruled, other)
+}
+
 /// 生效规则的三行展示信息。
 #[derive(Debug, Clone)]
 pub struct EffectiveInfo {
@@ -309,11 +323,12 @@ pub fn eff_row_top() -> f32 {
 }
 
 /// 菜单窗口总高度（点）。
-pub fn menu_height(n_devs: usize) -> f32 {
-    let dev_rows = if n_devs == 0 {
+/// `n_ruled` 为有规则设备的数量；设备区之后固定跟一行「其他设备」入口。
+pub fn menu_height(n_ruled: usize) -> f32 {
+    let dev_rows = if n_ruled == 0 {
         INFO_ROW_H
     } else {
-        n_devs as f32 * ROW_H
+        n_ruled as f32 * ROW_H
     };
     TOP_PAD
         + TITLE_H
@@ -324,6 +339,7 @@ pub fn menu_height(n_devs: usize) -> f32 {
         + EFF_INFO_H
         + SEP_H
         + dev_rows
+        + ROW_H
         + SEP_H
         + ROW_H
         + SEP_H
@@ -331,26 +347,78 @@ pub fn menu_height(n_devs: usize) -> f32 {
         + BOTTOM_PAD
 }
 
-/// 设备行布局：第 `idx` 行的菜单内 y 坐标起点（点）。
+/// 有规则设备行布局：第 `idx` 行的菜单内 y 坐标起点（点）。
 pub fn device_row_top(idx: usize) -> f32 {
     eff_row_top() + EFF_INFO_H + SEP_H + idx as f32 * ROW_H
 }
 
+/// 「其他设备」入口行的 y 起点（点）。
+pub fn other_row_top(n_ruled: usize) -> f32 {
+    if n_ruled == 0 {
+        device_row_top(0) + INFO_ROW_H
+    } else {
+        device_row_top(n_ruled)
+    }
+}
+
 /// 「开机自启」行的 y 起点（点）。
-pub fn autostart_row_top(n_devs: usize) -> f32 {
-    device_row_top(n_devs.max(1)) + SEP_H
+pub fn autostart_row_top(n_ruled: usize) -> f32 {
+    other_row_top(n_ruled) + ROW_H + SEP_H
 }
 
 /// 「退出」行的 y 起点（点）。
-pub fn exit_row_top(n_devs: usize) -> f32 {
-    autostart_row_top(n_devs) + ROW_H + SEP_H
+pub fn exit_row_top(n_ruled: usize) -> f32 {
+    autostart_row_top(n_ruled) + ROW_H + SEP_H
+}
+
+// ── 「其他设备」子菜单布局 ─────────────────────────────
+
+/// 其他设备列表子菜单宽度（点）。
+pub const OTHER_SUB_W: f32 = SUB_W;
+
+/// 其他设备列表子菜单中第 `idx` 行的 y 起点（点）。
+pub fn other_sub_row_top(idx: usize) -> f32 {
+    TOP_PAD + idx as f32 * ROW_H
+}
+
+/// 其他设备列表子菜单高度（点）。
+pub fn other_sub_height(n_other: usize) -> f32 {
+    if n_other == 0 {
+        INFO_ROW_H + 2.0 * TOP_PAD
+    } else {
+        n_other as f32 * ROW_H + 2.0 * TOP_PAD
+    }
+}
+
+/// 其他设备列表子菜单内 (x, y) 命中的本地行索引。
+pub fn other_sub_row_at(y: f32, n_other: usize) -> Option<usize> {
+    if n_other == 0 {
+        return None;
+    }
+    let top = other_sub_row_top(0);
+    if y < top {
+        return None;
+    }
+    let i = ((y - top) / ROW_H).floor();
+    if i >= 0.0 && (i as usize) < n_other {
+        Some(i as usize)
+    } else {
+        None
+    }
+}
+
+/// 「其他设备」入口的显示文本。
+pub fn other_entry_text(n_other: usize) -> String {
+    format!("其他设备 ({n_other})")
 }
 
 /// 菜单内 y 坐标的命中结果。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RowHit {
-    /// 第 idx 个设备行。
+    /// 第 idx 个有规则设备行。
     Device(usize),
+    /// 「其他设备」入口行。
+    OtherDevices,
     Autostart,
     Exit,
     /// 标题/滑块/生效规则行/空白等非命令区域。
@@ -358,21 +426,23 @@ pub enum RowHit {
 }
 
 /// 按菜单内 y 坐标做行命中测试（全行宽）。
-pub fn row_at(y: f32, n_devs: usize) -> RowHit {
-    if n_devs > 0 {
-        let top = device_row_top(0);
-        if y >= top {
-            let i = ((y - top) / ROW_H).floor();
-            if (i as usize) < n_devs && i >= 0.0 {
-                return RowHit::Device(i as usize);
-            }
+pub fn row_at(y: f32, n_ruled: usize) -> RowHit {
+    let top = device_row_top(0);
+    if n_ruled > 0 && y >= top && y < other_row_top(n_ruled) {
+        let i = ((y - top) / ROW_H).floor();
+        if (i as usize) < n_ruled && i >= 0.0 {
+            return RowHit::Device(i as usize);
         }
     }
-    let auto = autostart_row_top(n_devs);
+    let other = other_row_top(n_ruled);
+    if y >= other && y < other + ROW_H {
+        return RowHit::OtherDevices;
+    }
+    let auto = autostart_row_top(n_ruled);
     if y >= auto && y < auto + ROW_H {
         return RowHit::Autostart;
     }
-    let exit = exit_row_top(n_devs);
+    let exit = exit_row_top(n_ruled);
     if y >= exit && y < exit + ROW_H {
         return RowHit::Exit;
     }
@@ -396,20 +466,23 @@ pub fn reset_btn_rect() -> (f32, f32, f32, f32) {
 pub enum Hover {
     /// 标题行的「恢复默认」按钮。
     Reset,
-    /// 设备行。
+    /// 第 idx 个有规则设备行。
     Device(usize),
+    /// 「其他设备」入口行。
+    OtherDevices,
     Autostart,
     Exit,
 }
 
 /// 菜单内 (x, y) 的悬停目标；非命令区域返回 None。
-pub fn hover_at(x: f32, y: f32, n_devs: usize) -> Option<Hover> {
+pub fn hover_at(x: f32, y: f32, n_ruled: usize) -> Option<Hover> {
     let (l, t, r, b) = reset_btn_rect();
     if x >= l && x < r && y >= t && y < b {
         return Some(Hover::Reset);
     }
-    match row_at(y, n_devs) {
+    match row_at(y, n_ruled) {
         RowHit::Device(i) => Some(Hover::Device(i)),
+        RowHit::OtherDevices => Some(Hover::OtherDevices),
         RowHit::Autostart => Some(Hover::Autostart),
         RowHit::Exit => Some(Hover::Exit),
         RowHit::Other => None,
@@ -435,7 +508,12 @@ pub enum MenuAction {
 
 /// 菜单的全部交互状态（不含绘制）。
 pub struct MenuModel {
+    /// 全部设备行（全局索引）。
     pub devs: Vec<DevRow>,
+    /// 有规则设备的全局索引（主菜单设备区显示）。
+    pub ruled_devs: Vec<usize>,
+    /// 无规则设备的全局索引（「其他设备」子菜单显示）。
+    pub other_devs: Vec<usize>,
     /// 当前生效规则的完整信息（三行展示用）。
     pub effective: Option<EffectiveInfo>,
     pub autostart_on: bool,
@@ -447,20 +525,27 @@ pub struct MenuModel {
     pub wheel_val: u32,
     /// 滚轮滑块拖动中的预览值。
     pub pending_wheel: Option<u32>,
-    /// 子菜单目标：设备索引 + 行的菜单内 y 起点。Some = 子菜单应显示。
+    /// 单设备配置子菜单目标：全局设备索引 + 行的 owner 内 y 起点。Some = 子菜单应显示。
     pub sub_hover: Option<(usize, f32)>,
-    /// 子菜单指针滑块的本地预览值（纯本地，点「设为规则」才写入规则）。
+    /// 单设备配置子菜单指针滑块的本地预览值（纯本地，点「设为规则」才写入规则）。
     pub sub_slider: Option<u32>,
-    /// 子菜单滚轮滑块的本地预览值。
+    /// 单设备配置子菜单滚轮滑块的本地预览值。
     pub sub_wheel: Option<u32>,
-    /// 子菜单滚轮模式的本地配置预览。
+    /// 单设备配置子菜单滚轮模式的本地配置预览。
     pub sub_scroll: Option<ScrollCfg>,
     /// 子菜单正在录入触发键。
     pub capturing: bool,
-    /// 子菜单窗口回报的「指针在子菜单内」。
+    /// 单设备配置子菜单窗口回报的「指针在子菜单内」。
     /// 光标在菜单与子菜单之间移动时靠它保持子菜单不闪关。
     pub sub_pointer_inside: bool,
-    /// 键盘焦点行（扁平索引：0..n 为设备行，n 为自启行，n+1 为退出行）。
+    /// 主菜单「其他设备」入口是否悬停。
+    pub other_entry_hovered: bool,
+    /// 「其他设备」子菜单中悬停的全局设备索引。
+    pub other_dev_hover: Option<usize>,
+    /// 「其他设备」子菜单窗口回报的「指针在子菜单内」。
+    pub other_pointer_inside: bool,
+    /// 键盘焦点行（扁平索引：0..n 为有规则设备行，n 为「其他设备」入口，
+    /// n+1 为自启行，n+2 为退出行）。
     pub kb_focus: Option<usize>,
 }
 
@@ -468,6 +553,8 @@ impl MenuModel {
     pub fn new(speed_val: u32, wheel_val: u32, autostart_on: bool) -> MenuModel {
         MenuModel {
             devs: Vec::new(),
+            ruled_devs: Vec::new(),
+            other_devs: Vec::new(),
             effective: None,
             autostart_on,
             speed_val: speed_val.clamp(1, 20),
@@ -480,8 +567,29 @@ impl MenuModel {
             sub_scroll: None,
             capturing: false,
             sub_pointer_inside: false,
+            other_entry_hovered: false,
+            other_dev_hover: None,
+            other_pointer_inside: false,
             kb_focus: None,
         }
+    }
+
+    /// 设置全部设备行并自动分区为有规则/无规则索引。
+    pub fn set_devs(&mut self, devs: Vec<DevRow>) {
+        let (ruled, other) = partition_devs(&devs);
+        self.devs = devs;
+        self.ruled_devs = ruled;
+        self.other_devs = other;
+    }
+
+    /// 有规则设备数量。
+    pub fn n_ruled(&self) -> usize {
+        self.ruled_devs.len()
+    }
+
+    /// 无规则设备数量。
+    pub fn n_other(&self) -> usize {
+        self.other_devs.len()
     }
 
     /// 标题行显示的指针速度（拖动中显示预览值）。
@@ -565,15 +673,38 @@ impl MenuModel {
         }
     }
 
-    /// 更新子菜单开合状态：悬停设备行 → 开（记录行位置）；
-    /// 指针在子菜单内 → 保持；两者皆无 → 关。
-    /// `hovered_dev` 为绘制层命中测试得到的悬停设备行索引。
-    pub fn update_hover(&mut self, hovered_dev: Option<usize>) {
-        self.sub_hover = match hovered_dev {
-            Some(i) => Some((i, device_row_top(i))),
+    /// 更新单设备配置子菜单目标。
+    /// `dev_idx` 为全局设备索引；`row_top` 为该设备所在 owner 窗口中的 y 起点。
+    /// 指针在单设备配置子菜单内 → 保持；否则 None → 关。
+    pub fn update_sub_hover(&mut self, dev_idx: Option<usize>, row_top: f32) {
+        self.sub_hover = match dev_idx {
+            Some(i) => Some((i, row_top)),
             None if self.sub_pointer_inside => self.sub_hover,
             None => None,
         };
+    }
+
+    /// 更新主菜单有规则设备行的悬停：本地索引 → 全局索引 + 行位置。
+    pub fn update_hover_ruled(&mut self, local_idx: Option<usize>) {
+        let dev_idx = local_idx.map(|i| self.ruled_devs[i]);
+        let top = local_idx.map(|i| device_row_top(i)).unwrap_or(0.0);
+        self.update_sub_hover(dev_idx, top);
+        // 离开有规则设备行时同时清理其他设备入口悬停
+        if local_idx.is_none() {
+            self.other_entry_hovered = false;
+        }
+    }
+
+    /// 更新「其他设备」入口悬停状态。
+    pub fn set_other_entry_hover(&mut self, hovered: bool) {
+        self.other_entry_hovered = hovered;
+    }
+
+    /// 更新「其他设备」子菜单中的设备悬停。
+    /// `local_idx` 为列表内的本地索引，`row_top` 为列表窗口内的 y 起点。
+    pub fn update_other_hover(&mut self, local_idx: Option<usize>, row_top: f32) {
+        self.other_dev_hover = local_idx.map(|i| self.other_devs[i]);
+        self.update_sub_hover(local_idx.map(|i| self.other_devs[i]), row_top);
     }
 
     /// 点击菜单内 (x, y)：映射为命令动作。设备行本身无点击命令
@@ -583,16 +714,16 @@ impl MenuModel {
         if x >= l && x < r && y >= t && y < b {
             return vec![MenuAction::ResetDefault];
         }
-        match row_at(y, self.devs.len()) {
+        match row_at(y, self.ruled_devs.len()) {
             RowHit::Autostart => vec![MenuAction::ToggleAutostart],
             RowHit::Exit => vec![MenuAction::Exit],
             _ => Vec::new(),
         }
     }
 
-    /// 键盘焦点移到下一行（设备行… → 自启 → 退出，循环）。
+    /// 键盘焦点移到下一行（有规则设备 → 其他设备入口 → 自启 → 退出，循环）。
     pub fn kb_focus_next(&mut self) {
-        let n = self.devs.len() + 2;
+        let n = self.ruled_devs.len() + 3;
         self.kb_focus = Some(match self.kb_focus {
             Some(i) => (i + 1) % n,
             None => 0,
@@ -601,7 +732,7 @@ impl MenuModel {
 
     /// 键盘焦点移到上一行。
     pub fn kb_focus_prev(&mut self) {
-        let n = self.devs.len() + 2;
+        let n = self.ruled_devs.len() + 3;
         self.kb_focus = Some(match self.kb_focus {
             Some(0) => n - 1,
             Some(i) => i - 1,
@@ -609,12 +740,14 @@ impl MenuModel {
         });
     }
 
-    /// Enter/Space 激活当前键盘焦点行。设备行无命令动作。
-    /// 焦点扁平索引：0..n 为设备行，n 为自启，n+1 为退出。
+    /// Enter/Space 激活当前键盘焦点行。有规则设备行与「其他设备」入口无命令动作。
+    /// 焦点扁平索引：0..n 为有规则设备行，n 为「其他设备」入口，
+    /// n+1 为自启，n+2 为退出。
     pub fn kb_activate(&self) -> Vec<MenuAction> {
         match self.kb_focus {
-            Some(i) if i < self.devs.len() => Vec::new(),
-            Some(i) if i == self.devs.len() => vec![MenuAction::ToggleAutostart],
+            Some(i) if i < self.ruled_devs.len() => Vec::new(),
+            Some(i) if i == self.ruled_devs.len() => Vec::new(),
+            Some(i) if i == self.ruled_devs.len() + 1 => vec![MenuAction::ToggleAutostart],
             _ => vec![MenuAction::Exit],
         }
     }
@@ -700,23 +833,32 @@ mod tests {
     #[test]
     fn row_hit_test_bounds() {
         let n = 4;
-        // 设备行 0 与行 3
+        // 有规则设备行 0 与行 3
         assert_eq!(row_at(device_row_top(0) + 1.0, n), RowHit::Device(0));
         assert_eq!(
             row_at(device_row_top(3) + ROW_H - 0.5, n),
             RowHit::Device(3)
         );
+        // 「其他设备」入口行
+        assert_eq!(
+            row_at(other_row_top(n) + ROW_H / 2.0, n),
+            RowHit::OtherDevices
+        );
         // 设备区之后：自启、退出
         assert_eq!(row_at(autostart_row_top(n) + 1.0, n), RowHit::Autostart);
         assert_eq!(row_at(exit_row_top(n) + 1.0, n), RowHit::Exit);
-        // 标题、滑块、生效规则三行、设备区与自启行之间的分隔带、菜单底部 padding
+        // 标题、滑块、生效规则三行、「其他设备」入口与自启行之间的分隔带、菜单底部 padding
         assert_eq!(row_at(1.0, n), RowHit::Other);
         assert_eq!(row_at(wheel_label_top() + 1.0, n), RowHit::Other);
         assert_eq!(row_at(eff_row_top() + 1.0, n), RowHit::Other);
-        assert_eq!(row_at(device_row_top(n) + SEP_H / 2.0, n), RowHit::Other);
+        assert_eq!(
+            row_at(autostart_row_top(n) - SEP_H / 2.0, n),
+            RowHit::Other
+        );
         assert_eq!(row_at(menu_height(n) - 1.0, n), RowHit::Other);
-        // 无设备时设备区为占位信息行，不是 Device
+        // 无设备时设备区为占位信息行，不是 Device；但 OtherDevices 入口仍命中
         assert_eq!(row_at(device_row_top(0) + 1.0, 0), RowHit::Other);
+        assert_eq!(row_at(other_row_top(0) + 1.0, 0), RowHit::OtherDevices);
     }
 
     #[test]
@@ -729,55 +871,42 @@ mod tests {
     }
 
     fn model() -> MenuModel {
-        MenuModel {
-            devs: vec![
-                dev("A", Some("1"), Some("2"), None),
-                dev("B", None, None, None),
-            ],
-            effective: None,
-            autostart_on: false,
-            speed_val: 10,
-            pending_speed: None,
-            wheel_val: 3,
-            pending_wheel: None,
-            sub_hover: None,
-            sub_slider: None,
-            sub_wheel: None,
-            sub_scroll: None,
-            capturing: false,
-            sub_pointer_inside: false,
-            kb_focus: None,
-        }
+        let mut m = MenuModel::new(10, 3, false);
+        m.set_devs(vec![
+            dev("A", Some("1"), Some("2"), Some(4)),
+            dev("B", None, None, None),
+        ]);
+        m
     }
 
     #[test]
     fn hover_state_machine() {
         let mut m = model();
         // 悬停设备行 0 → 子菜单打开，记录行位置
-        m.update_hover(Some(0));
+        m.update_sub_hover(Some(0), device_row_top(0));
         assert_eq!(m.sub_hover, Some((0, device_row_top(0))));
 
         // 光标进入子菜单（菜单收不到指针）→ 保持
         m.sub_pointer_inside = true;
-        m.update_hover(None);
+        m.update_sub_hover(None, 0.0);
         assert!(m.sub_hover.is_some(), "移入子菜单不应关闭");
 
         // 光标离开子菜单且不在设备行 → 关闭
         m.sub_pointer_inside = false;
-        m.update_hover(None);
+        m.update_sub_hover(None, 0.0);
         assert!(m.sub_hover.is_none(), "指针离开后应关闭");
 
         // 悬停非设备行（自启行）→ 无子菜单
-        m.update_hover(None);
+        m.update_sub_hover(None, 0.0);
         assert!(m.sub_hover.is_none());
         // 悬停另一设备行 → 切换目标
-        m.update_hover(Some(1));
+        m.update_sub_hover(Some(1), device_row_top(1));
         assert_eq!(m.sub_hover, Some((1, device_row_top(1))));
     }
 
     #[test]
     fn click_rows_produce_actions() {
-        let n = 2;
+        let n = model().ruled_devs.len();
         let m = model();
         assert_eq!(
             m.click_at(60.0, autostart_row_top(n) + 5.0),
@@ -787,14 +916,14 @@ mod tests {
             m.click_at(60.0, exit_row_top(n) + 5.0),
             vec![MenuAction::Exit]
         );
-        // 设备行、标题行无点击命令
+        // 设备行（有规则设备）、标题行无点击命令
         assert!(m.click_at(60.0, device_row_top(0) + 5.0).is_empty());
         assert!(m.click_at(60.0, 1.0).is_empty());
     }
 
     #[test]
     fn hover_and_click_reset_button() {
-        let n = 2;
+        let n = model().ruled_devs.len();
         let m = model();
         // 按钮中心
         let (l, t, r, b) = reset_btn_rect();
@@ -809,16 +938,21 @@ mod tests {
         );
         // 按钮左侧仍是标题行，非命令区
         assert_eq!(hover_at(l - 10.0, (t + b) / 2.0, n), None);
-        // 设备行 hover
+        // 有规则设备行 hover
         assert_eq!(
             hover_at(60.0, device_row_top(0) + 5.0, n),
             Some(Hover::Device(0))
+        );
+        // 「其他设备」入口 hover
+        assert_eq!(
+            hover_at(60.0, other_row_top(n) + 5.0, n),
+            Some(Hover::OtherDevices)
         );
     }
 
     #[test]
     fn kb_focus_navigation_and_activation() {
-        let mut m = model(); // 2 台设备 → 索引 0,1 设备；2 自启；3 退出
+        let mut m = model(); // 1 台有规则设备 + 1 台无规则：索引 0 设备；1 其他设备入口；2 自启；3 退出
         assert_eq!(
             m.kb_activate(),
             vec![MenuAction::Exit],
@@ -829,7 +963,7 @@ mod tests {
         assert!(m.kb_activate().is_empty(), "设备行 Enter 无动作");
         m.kb_focus_next();
         assert_eq!(m.kb_focus, Some(1));
-        assert!(m.kb_activate().is_empty(), "设备行 Enter 无动作");
+        assert!(m.kb_activate().is_empty(), "其他设备入口 Enter 无动作");
         m.kb_focus_next();
         assert_eq!(m.kb_activate(), vec![MenuAction::ToggleAutostart]);
         m.kb_focus_next();

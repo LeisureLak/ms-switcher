@@ -7,6 +7,7 @@ pub mod device_notify;
 pub mod focus;
 pub mod host;
 pub mod menu;
+pub mod other_submenu;
 pub mod scroll_hook;
 pub mod submenu;
 pub mod tray;

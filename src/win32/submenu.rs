@@ -38,8 +38,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 use crate::menu_model::{
-    DevRow, Hover, MENU_W, MenuAction, PAD, SUB_INFO_TOP, SUB_ROW_H, SUB_W, sub_action_top,
-    sub_btn_at, sub_btn_rect, sub_height, sub_kb_trigger_at, sub_kb_trigger_top, sub_ptr_label_top,
+    DevRow, Hover, MenuAction, PAD, SUB_INFO_TOP, SUB_ROW_H, SUB_W, sub_action_top, sub_btn_at,
+    sub_btn_rect, sub_height, sub_kb_trigger_at, sub_kb_trigger_top, sub_ptr_label_top,
     sub_row_at, sub_scroll_mode_at, sub_scroll_mode_top, sub_scroll_sens_label_top,
     sub_scroll_sens_rect, sub_scroll_trigger_at, sub_scroll_trigger_top, sub_slider_rect,
     sub_wheel_label_top, sub_wheel_rect,
@@ -55,8 +55,9 @@ use super::menu::{
 /// TBM_GETPOS 未包含在 windows crate 绑定中，值为 WM_USER（与 menu.rs 一致）。
 const TBM_GETPOS: u32 = win::WM_USER;
 
-/// 按模型子菜单状态开/关/切换子菜单窗口（主菜单 WM_MOUSEMOVE/LEAVE 驱动）。
-pub fn sync(state: &mut HostState, menu_hwnd: HWND) {
+/// 按模型子菜单状态开/关/切换子菜单窗口（主菜单/other 列表 WM_MOUSEMOVE/LEAVE 驱动）。
+/// `owner_hwnd` 为单设备配置子菜单贴靠的父窗口（主菜单或「其他设备」列表）。
+pub fn sync(state: &mut HostState, owner_hwnd: HWND) {
     let want = state.model.sub_hover;
     match (want, state.sub) {
         (_, Some(_)) if state.sub_dev == want.map(|(i, _)| i) => {}
@@ -64,7 +65,7 @@ pub fn sync(state: &mut HostState, menu_hwnd: HWND) {
             if cur.is_some() {
                 close(state);
             }
-            if let Err(e) = open(state, menu_hwnd, idx, top) {
+            if let Err(e) = open(state, owner_hwnd, idx, top) {
                 if state.debug {
                     eprintln!("[mss-debug] open submenu failed: {e}");
                 }
@@ -75,10 +76,10 @@ pub fn sync(state: &mut HostState, menu_hwnd: HWND) {
     }
 }
 
-/// 打开设备子菜单：紧贴主菜单右缘、顶对齐悬停行；不抢焦点。
+/// 打开设备子菜单：紧贴 owner 右缘、顶对齐悬停行；不抢焦点。
 fn open(
     state: &mut HostState,
-    menu_hwnd: HWND,
+    owner_hwnd: HWND,
     idx: usize,
     row_top: f32,
 ) -> Result<HWND, windows::core::Error> {
@@ -87,27 +88,27 @@ fn open(
 
     let mut mr = RECT::default();
     unsafe {
-        let _ = GetWindowRect(menu_hwnd, &mut mr);
+        let _ = GetWindowRect(owner_hwnd, &mut mr);
     }
-    let s = dpi_scale(menu_hwnd);
+    let s = dpi_scale(owner_hwnd);
     let sub_w = (SUB_W * s).round() as i32;
     let sub_h = (sub_height() * s).round() as i32;
 
-    // 位置：默认紧贴主菜单右缘；右侧出工作区则改为左缘展开；垂直方向
-    // 顶对齐悬停行并夹取到工作区内（多显示器按菜单所在显示器计算）。
+    // 位置：默认紧贴 owner 右缘；右侧出工作区则改为左缘展开；垂直方向
+    // 顶对齐悬停行并夹取到工作区内（多显示器按 owner 所在显示器计算）。
     let (work, _menu_mon) = unsafe {
         use windows::Win32::Graphics::Gdi::{
             GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
         };
-        let mon = MonitorFromWindow(menu_hwnd, MONITOR_DEFAULTTONEAREST);
+        let mon = MonitorFromWindow(owner_hwnd, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO::default();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         let _ = GetMonitorInfoW(mon, &mut mi);
         (mi, mon)
     };
-    let x_right = mr.left + (MENU_W * s).round() as i32;
+    let x_right = mr.right; // owner 右缘（物理像素）
     let x = if x_right + sub_w > work.rcWork.right && mr.left - sub_w >= work.rcWork.left {
-        mr.left - sub_w // 右侧放不下：贴主菜单左缘
+        mr.left - sub_w // 右侧放不下：贴 owner 左缘
     } else {
         x_right
     };
@@ -126,7 +127,7 @@ fn open(
             y,
             sub_w,
             sub_h,
-            Some(menu_hwnd), // owner：主菜单销毁时级联销毁
+            Some(owner_hwnd), // owner：父窗口销毁时级联销毁
             None,
             Some(hinstance.into()),
             Some(state.hwnd.0.cast()),
@@ -390,10 +391,11 @@ pub unsafe extern "system" fn sub_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             state.model.sub_pointer_inside = false;
             state.sub_hover_row = None;
             let _ = InvalidateRect(Some(hwnd), None, false);
-            // 指针离开子菜单：若不在主菜单设备行上，请求异步关闭。
-            // 处理时会重新检查悬停状态（移入主菜单设备行时硬件消息
-            // 先于本投递消息处理，不会误关）。
-            if !matches!(state.hover, Some(Hover::Device(_))) {
+            // 指针离开子菜单：若不在主菜单设备行/其他设备入口或列表内，
+            // 请求异步关闭。处理时重新检查悬停状态。
+            let keep = matches!(state.hover, Some(Hover::Device(_) | Hover::OtherDevices))
+                || state.model.other_pointer_inside;
+            if !keep {
                 state.model.sub_hover = None;
                 let _ = PostMessageW(Some(host), WM_APP_CLOSE_SUBMENU, WPARAM(0), LPARAM(0));
             }

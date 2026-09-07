@@ -49,6 +49,8 @@ use crate::{devices, speed, state::AppState};
 pub const WM_APP_CLOSE_MENU: u32 = win::WM_USER + 2;
 /// 关闭设备子菜单请求（异步，处理时重新检查悬停状态）。
 pub const WM_APP_CLOSE_SUBMENU: u32 = win::WM_USER + 3;
+/// 关闭「其他设备」列表子菜单请求（异步，处理时重新检查悬停状态）。
+pub const WM_APP_CLOSE_OTHER_SUBMENU: u32 = win::WM_USER + 8;
 /// 子菜单滑块（子控件）的 leave 通知：光标可能从滑块直接移出子菜单窗口。
 pub const WM_APP_SUB_LEFT: u32 = win::WM_USER + 4;
 // WM_USER + 5 = 滚轮模式触发键录入完成/取消（scroll_hook::WM_APP_SCROLL_CHANGED）
@@ -97,17 +99,23 @@ pub struct HostState {
     pub sub_scroll_trackbar: Option<HWND>,
     /// 菜单字体（按菜单窗口 DPI 创建，菜单关闭时销毁）。
     pub font: windows::Win32::Graphics::Gdi::HFONT,
-    /// 设备子菜单窗口。
+    /// 设备子菜单窗口（单设备配置面板）。
     pub sub: Option<HWND>,
-    /// 子菜单对应的设备行索引。
+    /// 子菜单对应的设备全局索引。
     pub sub_dev: Option<usize>,
     /// 子菜单内悬停的操作行（None = 信息行/无）。
     pub sub_hover_row: Option<usize>,
+    /// 其他设备列表子菜单窗口。
+    pub other_sub: Option<HWND>,
+    /// 其他设备列表子菜单中悬停的设备本地索引。
+    pub other_sub_hover: Option<usize>,
+    /// 其他设备列表子菜单中按住的本地索引（按下反馈）。
+    pub other_sub_pressed: Option<usize>,
     /// 菜单内当前悬停目标。
     pub hover: Option<Hover>,
     /// 主菜单中按住的命令区（按下反馈；松手且未移出才触发动作）。
     pub pressed: Option<Hover>,
-    /// 子菜单中按住的槽位（0..2 = 操作行，3 = 「设为规则」按钮）。
+    /// 单设备配置子菜单中按住的槽位（0..2 = 操作行，3 = 「设为规则」按钮）。
     pub sub_pressed: Option<usize>,
     /// 鼠标接口设备通知句柄（RAII）。
     pub dev_notify: Option<MouseDevNotify>,
@@ -143,6 +151,9 @@ impl HostState {
             sub: None,
             sub_dev: None,
             sub_hover_row: None,
+            other_sub: None,
+            other_sub_hover: None,
+            other_sub_pressed: None,
             hover: None,
             pressed: None,
             sub_pressed: None,
@@ -263,6 +274,17 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             }
             LRESULT(0)
         }
+        WM_APP_CLOSE_OTHER_SUBMENU => {
+            // 处理时重新检查：指针可能已回到「其他设备」入口/列表子菜单
+            if !state.model.other_entry_hovered && state.model.other_dev_hover.is_none() {
+                super::other_submenu::close(state);
+                // other 列表关闭后，若其上的单设备配置子菜单无悬停也一并关闭
+                if state.model.sub_hover.is_none() {
+                    submenu::close(state);
+                }
+            }
+            LRESULT(0)
+        }
         WM_APP_SCROLL_INJECT => {
             // 滚轮注入冲刷：钩子回调只累积+投递，SendInput 只在普通处理
             // 上下文里执行（钩子回调内注入会自锁 win32k，见踩坑 四-16）
@@ -336,7 +358,9 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 state.sub_pressed = None;
                 state.model.sub_pointer_inside = false;
                 state.sub_hover_row = None;
-                if !matches!(state.hover, Some(Hover::Device(_))) {
+                if !matches!(state.hover, Some(Hover::Device(_) | Hover::OtherDevices))
+                    && !state.model.other_pointer_inside
+                {
                     state.model.sub_hover = None;
                 }
                 if state.model.sub_hover.is_none() {
@@ -481,7 +505,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                         as *const HostState;
                     let inside = !ptr.is_null() && {
                         let s = &*ptr;
-                        [s.menu, s.sub]
+                        [s.menu, s.other_sub, s.sub]
                             .into_iter()
                             .flatten()
                             .any(|h| point_in_window(h, info.pt))
@@ -525,6 +549,11 @@ fn open_menu(state: &mut HostState) {
             state.menu_ever_active.store(false, Ordering::Relaxed);
             state.pressed = None;
             state.sub_pressed = None;
+            state.other_sub_pressed = None;
+            state.other_sub_hover = None;
+            state.model.other_entry_hovered = false;
+            state.model.other_dev_hover = None;
+            state.model.other_pointer_inside = false;
             install_mouse_close_hook(state.hwnd);
             // 菜单打开期间滚轮模式放行（侧键/键盘恢复正常语义）。
             // 若打开瞬间鼠标/键盘触发键恰好按着（如按着侧键点托盘），直接复位
@@ -572,9 +601,10 @@ pub fn close_menu(state: &mut HostState) {
             }
             state.font = windows::Win32::Graphics::Gdi::HFONT::default();
         }
-        state.sub = None; // 子菜单是菜单的 ownee，随级联销毁
-        state.sub_dev = None;
-        state.sub_hover_row = None;
+        // 单设备配置子菜单与其他设备列表子菜单都是菜单的 ownee，随级联销毁
+        super::other_submenu::close(state);
+        super::submenu::close(state);
+        state.other_sub = None;
         // 前台焦点归还须在 DestroyWindow 之前：此时前台多半还在菜单手里
         // （或落在任务栏），仍持有前台/可附加到前台线程才有权移交。
         // 若当前前台已是别人的正常窗口（点击菜单外关闭），restore 内不插手。
@@ -605,25 +635,28 @@ pub fn close_menu(state: &mut HostState) {
 fn debounced_scan(state: &mut HostState) {
     let mice = devices::enumerate_mice();
     state.app.apply_diff(&mice);
-    let changed = state.model.devs.len() != mice.len();
-    state.model.devs = menu_model::build_dev_rows(&mice, &state.app);
+    let devs = menu_model::build_dev_rows(&mice, &state.app);
+    let changed = state.model.devs.len() != devs.len();
+    state.model.set_devs(devs);
     state.model.effective = menu_model::effective_info(&state.app);
     if state.debug {
         eprintln!("[mss-debug] dev scan: {} mice", mice.len());
     }
     if changed {
         // 设备数变化后子菜单的设备索引可能失效，先关掉
-        submenu::close(state);
+        super::other_submenu::close(state);
+        super::submenu::close(state);
         state.model.sub_hover = None;
+        state.model.other_dev_hover = None;
+        state.model.other_entry_hovered = false;
     }
     invalidate_menus(state);
     sync_tip(state);
 }
 
-/// 菜单打开中则整体重绘。主菜单与子菜单都标脏：子菜单内容同样依赖模型
-/// （触发键录入结果、设备行启用态等），漏标会出现「模型已改但画面不变」。
+/// 菜单打开中则整体重绘。主菜单、其他设备列表子菜单与单设备配置子菜单都标脏。
 fn invalidate_menus(state: &HostState) {
-    for h in [state.menu, state.sub].into_iter().flatten() {
+    for h in [state.menu, state.other_sub, state.sub].into_iter().flatten() {
         unsafe {
             let _ = InvalidateRect(Some(h), None, false);
         }

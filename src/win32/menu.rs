@@ -52,8 +52,8 @@ use windows::core::w;
 use crate::menu_model::{
     self, CHECK_W, EFF_INFO_H, EffectiveInfo, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H,
     RULE_ICON_W, SEP_H, SLIDER_H, TITLE_H, TOP_PAD, autostart_row_top, device_row_top,
-    eff_row_top, exit_row_top, hover_at, menu_height, reset_btn_rect, wheel_label_top,
-    wheel_slider_top,
+    eff_row_top, exit_row_top, hover_at, menu_height, other_entry_text, other_row_top,
+    reset_btn_rect, wheel_label_top, wheel_slider_top,
 };
 use crate::scroll::{SCROLL_PX_DEFAULT, TriggerBtn};
 
@@ -285,6 +285,8 @@ pub fn register_class(hinstance: HINSTANCE) {
         };
         assert_ne!(RegisterClassExW(&wcsub), 0, "register submenu class");
 
+        super::other_submenu::register_class(hinstance);
+
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_BAR_CLASSES,
@@ -308,7 +310,8 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
     // 数据刷新（与旧版 open_menu 一致）
     let mice = crate::devices::enumerate_mice();
     state.app.apply_diff(&mice);
-    state.model.devs = menu_model::build_dev_rows(&mice, &state.app);
+    state.model
+        .set_devs(menu_model::build_dev_rows(&mice, &state.app));
     state.model.effective = menu_model::effective_info(&state.app);
     state.model.speed_val = crate::speed::get();
     state.model.wheel_val = crate::speed::get_wheel();
@@ -354,7 +357,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             GetDpiForWindow(hwnd)
         });
     }
-    let h_dip = menu_height(state.model.devs.len());
+    let h_dip = menu_height(state.model.ruled_devs.len());
     // 主菜单按自身宽度夹取；子菜单放不下时由 submenu 自行翻转到左缘
     let (x, y) = clamp_to_work_area(pt, MENU_W * s, h_dip * s);
     unsafe {
@@ -548,7 +551,8 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_MOUSEMOVE => {
             let state = &mut *ptr;
             let (x, y) = dip_from_lp(hwnd, lp);
-            let h = hover_at(x, y, state.model.devs.len());
+            let n_ruled = state.model.ruled_devs.len();
+            let h = hover_at(x, y, n_ruled);
             if state.debug {
                 eprintln!(
                     "[mss-debug] menu mm raw={:#x} ({x:.0},{y:.0}) hover={h:?} scale={}",
@@ -560,12 +564,28 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 state.hover = h;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
-            let dev_idx = match h {
-                Some(Hover::Device(i)) => Some(i),
-                _ => None,
-            };
-            state.model.update_hover(dev_idx);
-            super::submenu::sync(state, hwnd);
+            match h {
+                Some(Hover::Device(local)) => {
+                    state.model.set_other_entry_hover(false);
+                    state.model.update_hover_ruled(Some(local));
+                    super::other_submenu::sync(state, hwnd);
+                    super::submenu::sync(state, hwnd);
+                }
+                Some(Hover::OtherDevices) => {
+                    // 先清掉单设备配置子菜单目标（update_hover_ruled 会顺带
+                    // 把 other_entry_hovered 清 false），再显式标记为 other 入口。
+                    state.model.update_hover_ruled(None);
+                    state.model.set_other_entry_hover(true);
+                    super::other_submenu::sync(state, hwnd);
+                    super::submenu::sync(state, hwnd);
+                }
+                _ => {
+                    state.model.set_other_entry_hover(false);
+                    state.model.update_hover_ruled(None);
+                    super::other_submenu::sync(state, hwnd);
+                    super::submenu::sync(state, hwnd);
+                }
+            }
             let mut tme = TRACKMOUSEEVENT {
                 cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                 dwFlags: TME_LEAVE,
@@ -582,15 +602,27 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 state.hover = None;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
-            state.model.update_hover(None);
-            super::submenu::sync(state, hwnd);
+            // 鼠标离开主菜单：若光标仍在其他设备列表/单设备配置子菜单内，
+            // 保持打开；否则清理悬停状态。
+            let inside_other = state
+                .other_sub
+                .map_or(false, |h| super::other_submenu::cursor_inside_window(h));
+            let inside_sub = state
+                .sub
+                .map_or(false, |h| super::submenu::cursor_inside_window(h));
+            if !inside_other && !inside_sub {
+                state.model.set_other_entry_hover(false);
+                state.model.update_hover_ruled(None);
+                super::other_submenu::sync(state, hwnd);
+                super::submenu::sync(state, hwnd);
+            }
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
             // 按下反馈：只在命令区登记按压态，松手且未移出才触发
             let state = &mut *ptr;
             let (x, y) = dip_from_lp(hwnd, lp);
-            state.pressed = match hover_at(x, y, state.model.devs.len()) {
+            state.pressed = match hover_at(x, y, state.model.ruled_devs.len()) {
                 Some(h @ (Hover::Reset | Hover::Autostart | Hover::Exit)) => Some(h),
                 _ => None,
             };
@@ -603,7 +635,7 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let state = &mut *ptr;
             let (x, y) = dip_from_lp(hwnd, lp);
             let pressed = state.pressed.take();
-            let fire = pressed.is_some() && pressed == hover_at(x, y, state.model.devs.len());
+            let fire = pressed.is_some() && pressed == hover_at(x, y, state.model.ruled_devs.len());
             let _ = InvalidateRect(Some(hwnd), None, false);
             if fire {
                 let actions = state.model.click_at(x, y);
@@ -985,7 +1017,8 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
 fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
     unsafe {
         let model = &state.model;
-        let n = model.devs.len();
+        let n = model.ruled_devs.len();
+        let n_other = model.other_devs.len();
         let pal = current_pal(state);
 
         // 背景 + 边框
@@ -1140,22 +1173,23 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
 
         sep(hdc, eff_y + EFF_INFO_H, s, w, pal.sep);
 
-        // ── 设备行 ──
+        // ── 设备行（只显示有规则设备）──
         if n == 0 {
-            let py = eff_y + EFF_INFO_H + SEP_H;
+            let py = device_row_top(0) + INFO_ROW_H / 2.0;
             draw_text(
                 hdc,
-                "未检测到鼠标设备",
+                "无生效规则设备",
                 PAD,
-                py + INFO_ROW_H / 2.0,
+                py,
                 s,
                 pal.gray,
             );
         }
-        for (i, d) in model.devs.iter().enumerate() {
-            let top = device_row_top(i);
-            let hovered = state.hover == Some(Hover::Device(i));
-            let focused = model.kb_focus == Some(i);
+        for (local, &global) in model.ruled_devs.iter().enumerate() {
+            let d = &model.devs[global];
+            let top = device_row_top(local);
+            let hovered = state.hover == Some(Hover::Device(local));
+            let focused = model.kb_focus == Some(local);
             let color = if hovered { pal.hl_text } else { pal.text };
             draw_row_bg(
                 hdc,
@@ -1194,6 +1228,35 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
             );
         }
 
+        // ── 「其他设备」入口行 ──
+        let other_top = other_row_top(n);
+        let other_hovered = state.hover == Some(Hover::OtherDevices);
+        let other_focused = model.kb_focus == Some(n);
+        draw_row_bg(
+            hdc,
+            other_top,
+            ROW_H,
+            s,
+            w,
+            other_hovered,
+            false,
+            other_focused,
+            pal.highlight,
+            pal.row_pressed,
+        );
+        draw_text(
+            hdc,
+            &other_entry_text(n_other),
+            PAD + CHECK_W,
+            other_top + ROW_H / 2.0,
+            s,
+            if other_hovered || other_focused {
+                pal.hl_text
+            } else {
+                pal.text
+            },
+        );
+
         let auto_top = autostart_row_top(n);
         sep(hdc, auto_top - SEP_H, s, w, pal.sep);
 
@@ -1201,7 +1264,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         {
             let hovered = state.hover == Some(Hover::Autostart);
             let pressed = state.pressed == Some(Hover::Autostart);
-            let focused = model.kb_focus == Some(n);
+            let focused = model.kb_focus == Some(n + 1);
             let color = if hovered || pressed {
                 pal.hl_text
             } else {
@@ -1239,7 +1302,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         {
             let hovered = state.hover == Some(Hover::Exit);
             let pressed = state.pressed == Some(Hover::Exit);
-            let focused = model.kb_focus == Some(n + 1);
+            let focused = model.kb_focus == Some(n + 2);
             let color = if hovered || pressed {
                 pal.hl_text
             } else {
@@ -1274,7 +1337,7 @@ fn rect_px(l: f32, t: f32, r: f32, b: f32, s: f32) -> RECT {
 }
 
 /// 行背景：悬停整行高亮；按压用更深一档的颜色；键盘焦点画系统焦点框。
-fn draw_row_bg(
+pub(crate) fn draw_row_bg(
     hdc: HDC,
     top_dip: f32,
     h_dip: f32,
