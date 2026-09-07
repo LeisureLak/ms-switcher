@@ -6,8 +6,8 @@
 use windows::Win32::Devices::HumanInterfaceDevice::GUID_DEVINTERFACE_MOUSE;
 use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{
-    RegisterDeviceNotificationW, UnregisterDeviceNotification, DBT_DEVTYP_DEVICEINTERFACE,
-    DEV_BROADCAST_DEVICEINTERFACE_W, DEVICE_NOTIFY_WINDOW_HANDLE, HDEVNOTIFY,
+    DBT_DEVTYP_DEVICEINTERFACE, DEV_BROADCAST_DEVICEINTERFACE_W, DEVICE_NOTIFY_WINDOW_HANDLE,
+    HDEVNOTIFY, RegisterDeviceNotificationW, UnregisterDeviceNotification,
 };
 
 /// 鼠标接口设备通知（GUID_DEVINTERFACE_MOUSE）。

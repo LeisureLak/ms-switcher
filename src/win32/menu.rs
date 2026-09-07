@@ -16,48 +16,48 @@
 
 use std::ffi::c_void;
 
-use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, InvalidateRect, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawFocusRect, DrawTextW, EndPaint, FillRect,
-    FrameRect, LineTo, MoveToEx, SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS,
-    CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT, DT_NOPREFIX,
-    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, HDC, HFONT, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawFocusRect, DrawTextW,
+    EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect, HDC, HFONT, InvalidateRect, LineTo,
+    MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{GetCurrentThreadId, AttachThreadInput};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, TBM_SETPOS, TBM_SETRANGE,
+    ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TBM_SETPOS, TBM_SETRANGE,
     TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASS, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE,
-    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetCursorPos, GetClientRect,
-    GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, LoadCursorW, PostMessageW,
-    RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, HMENU, IDC_ARROW, SWP_NOZORDER, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CHILD,
-    WS_POPUP, WS_VISIBLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect,
+    GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, HMENU,
+    IDC_ARROW, LoadCursorW, PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CHILD, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
+use windows::core::w;
 
 use crate::menu_model::{
-    self, autostart_row_top, device_row_top, eff_row_top, exit_row_top, hover_at, menu_height,
-    reset_btn_rect, scroll_mode_top, scroll_sens_label_top, scroll_sens_slider_top,
-    scroll_trigger_top, wheel_label_top, wheel_slider_top, Hover, MenuAction, CHECK_W, INFO_ROW_H,
-    MENU_W, PAD, ROW_H, RULE_ICON_W, SEP_H, SLIDER_H, SUB_W, TITLE_H, TOP_PAD,
+    self, CHECK_W, EFF_INFO_H, EffectiveInfo, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H,
+    RULE_ICON_W, SEP_H, SLIDER_H, SUB_W, TITLE_H, TOP_PAD, autostart_row_top, device_row_top,
+    eff_row_top, exit_row_top, hover_at, menu_height, reset_btn_rect, wheel_label_top,
+    wheel_slider_top,
 };
-use crate::scroll::{SCROLL_PX_MAX, SCROLL_PX_MIN};
+use crate::scroll::{SCROLL_PX_DEFAULT, TriggerBtn};
 
-use super::host::{sync_tip, HostState, WM_APP_CLOSE_MENU};
+use super::host::{HostState, WM_APP_CLOSE_MENU, sync_tip};
 
 /// TBM_GETPOS 未包含在 windows crate 绑定中，值为 WM_USER。
 const TBM_GETPOS: u32 = win::WM_USER;
@@ -106,34 +106,34 @@ pub(crate) struct Pal {
 }
 
 pub(crate) fn palette(dark: bool) -> Pal {
-        if dark {
-            Pal {
-                bg: COLORREF(0x002C_2C2C),
-                border: COLORREF(0x005A_5A5A),
-                sep: COLORREF(0x003F_3F3F),
-                text: COLORREF(0x00F3_F3F3),
-                gray: COLORREF(0x00A0_A0A0),
-                highlight: HIGHLIGHT,
-                row_pressed: COLORREF(0x0077_4500), // #004577，比 #0078D7 深一档
-                hl_text: HIGHLIGHT_TEXT,
-                // 按钮悬停/按下与行高亮同色系：灰阶差只有 ~6%，肉眼不可辨
-                btn_hover: HIGHLIGHT,
-                btn_pressed: COLORREF(0x0077_4500), // #004577
-            }
-        } else {
-            Pal {
-                bg: BG,
-                border: BORDER,
-                sep: SEPARATOR,
-                text: TEXT,
-                gray: GRAY,
-                highlight: HIGHLIGHT,
-                row_pressed: COLORREF(0x009E_5A00), // #005A9E
-                hl_text: HIGHLIGHT_TEXT,
-                btn_hover: HIGHLIGHT,
-                btn_pressed: COLORREF(0x009E_5A00), // #005A9E
-            }
+    if dark {
+        Pal {
+            bg: COLORREF(0x002C_2C2C),
+            border: COLORREF(0x005A_5A5A),
+            sep: COLORREF(0x003F_3F3F),
+            text: COLORREF(0x00F3_F3F3),
+            gray: COLORREF(0x00A0_A0A0),
+            highlight: HIGHLIGHT,
+            row_pressed: COLORREF(0x0077_4500), // #004577，比 #0078D7 深一档
+            hl_text: HIGHLIGHT_TEXT,
+            // 按钮悬停/按下与行高亮同色系：灰阶差只有 ~6%，肉眼不可辨
+            btn_hover: HIGHLIGHT,
+            btn_pressed: COLORREF(0x0077_4500), // #004577
         }
+    } else {
+        Pal {
+            bg: BG,
+            border: BORDER,
+            sep: SEPARATOR,
+            text: TEXT,
+            gray: GRAY,
+            highlight: HIGHLIGHT,
+            row_pressed: COLORREF(0x009E_5A00), // #005A9E
+            hl_text: HIGHLIGHT_TEXT,
+            btn_hover: HIGHLIGHT,
+            btn_pressed: COLORREF(0x009E_5A00), // #005A9E
+        }
+    }
 }
 
 /// 高对比度：全部取系统菜单色，保证可辨认。
@@ -158,9 +158,7 @@ pub(crate) fn hc_pal() -> Pal {
 
 /// 系统「应用使用深色模式」？（注册表 AppsUseLightTheme；缺省浅色）
 pub(crate) fn system_dark() -> bool {
-    use windows::Win32::System::Registry::{
-        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
-    };
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     use windows::core::w;
     let mut v: u32 = 1;
     let mut size = 4u32;
@@ -183,8 +181,8 @@ pub(crate) fn system_dark() -> bool {
 /// DWM 现代外观：Win11 圆角小圆角 + 边框色；Win10 属性不支持时静默降级。
 pub(crate) fn apply_dwm(hwnd: HWND, pal: &Pal) {
     use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWCP_ROUNDSMALL,
+        DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL,
+        DwmSetWindowAttribute,
     };
     unsafe {
         let pref: u32 = DWMWCP_ROUNDSMALL.0 as u32;
@@ -217,7 +215,7 @@ pub(crate) fn current_pal(state: &HostState) -> Pal {
 pub(crate) fn high_contrast() -> bool {
     use windows::Win32::UI::Accessibility::HIGHCONTRASTW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SystemParametersInfoW, SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     };
     let mut hc = HIGHCONTRASTW::default();
     hc.cbSize = std::mem::size_of::<HIGHCONTRASTW>() as u32;
@@ -238,8 +236,19 @@ pub(crate) fn menu_font_for(dpi: u32) -> HFONT {
     let h_px = -(13 * dpi as i32 / 96).max(8);
     unsafe {
         CreateFontW(
-            h_px, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+            h_px,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
             w!("Microsoft YaHei UI"),
         )
     }
@@ -300,18 +309,16 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
     let mice = crate::devices::enumerate_mice();
     state.app.apply_diff(&mice);
     state.model.devs = menu_model::build_dev_rows(&mice, &state.app);
-    state.model.effective = menu_model::effective_name(&state.app);
+    state.model.effective = menu_model::effective_info(&state.app);
     state.model.speed_val = crate::speed::get();
     state.model.wheel_val = crate::speed::get_wheel();
     state.model.pending_speed = None;
     state.model.pending_wheel = None;
     state.model.sub_slider = None;
+    state.model.sub_wheel = None;
+    state.model.sub_scroll = None;
     state.model.autostart_on = crate::autostart::is_enabled();
-    state.model.scroll_on = state.app.cfg.scroll.enabled;
-    state.model.scroll_trigger = state.app.cfg.scroll.trigger;
-    state.model.scroll_px = state.app.cfg.scroll.px_per_notch;
-    state.model.pending_scroll_px = None;
-    state.model.capturing = super::scroll_hook::is_capturing();
+    state.model.capturing = false;
     state.model.kb_focus = None;
     state.hover = None;
 
@@ -343,7 +350,9 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
 
     let s = dpi_scale(hwnd);
     if state.debug {
-        eprintln!("[mss-debug] open: menu dpi={}", unsafe { GetDpiForWindow(hwnd) });
+        eprintln!("[mss-debug] open: menu dpi={}", unsafe {
+            GetDpiForWindow(hwnd)
+        });
     }
     let h_dip = menu_height(state.model.devs.len());
     // 按「菜单+子菜单」全宽夹取，保证子菜单在右/左展开都不出屏
@@ -401,8 +410,18 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
         )?
     };
     unsafe {
-        SendMessageW(tb, TBM_SETRANGE, Some(WPARAM(0)), Some(LPARAM(makelong(1, 20) as isize)));
-        SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(state.model.speed_val as isize)));
+        SendMessageW(
+            tb,
+            TBM_SETRANGE,
+            Some(WPARAM(0)),
+            Some(LPARAM(makelong(1, 20) as isize)),
+        );
+        SendMessageW(
+            tb,
+            TBM_SETPOS,
+            Some(WPARAM(1)),
+            Some(LPARAM(state.model.speed_val as isize)),
+        );
         let _ = SetWindowSubclass(tb, Some(trackbar_proc), 1, state.hwnd.0 as usize);
         SendMessageW(
             tb_wheel,
@@ -418,41 +437,8 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
         );
         let _ = SetWindowSubclass(tb_wheel, Some(trackbar_proc), 2, state.hwnd.0 as usize);
     }
-    // 滚轮灵敏度 Trackbar（5–200 像素/齿，松手才应用）
-    let tb_scroll = unsafe {
-        CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            TRACKBAR_CLASS,
-            w!(""),
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
-            px(hwnd, PAD),
-            px(hwnd, scroll_sens_slider_top()),
-            px(hwnd, MENU_W - 2.0 * PAD),
-            px(hwnd, SLIDER_H),
-            Some(hwnd),
-            Some(HMENU(5 as *mut c_void)),
-            Some(hinstance.into()),
-            None,
-        )?
-    };
-    unsafe {
-        SendMessageW(
-            tb_scroll,
-            TBM_SETRANGE,
-            Some(WPARAM(0)),
-            Some(LPARAM(makelong(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as isize)),
-        );
-        SendMessageW(
-            tb_scroll,
-            TBM_SETPOS,
-            Some(WPARAM(1)),
-            Some(LPARAM(state.model.scroll_px as isize)),
-        );
-        let _ = SetWindowSubclass(tb_scroll, Some(trackbar_proc), 5, state.hwnd.0 as usize);
-    }
     state.trackbar = Some(tb);
     state.wheel_trackbar = Some(tb_wheel);
-    state.scroll_trackbar = Some(tb_scroll);
 
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -476,9 +462,8 @@ fn force_foreground(hwnd: HWND) {
         } else {
             GetWindowThreadProcessId(fg, None)
         };
-        let attached = fg_thread != 0
-            && fg_thread != cur
-            && AttachThreadInput(fg_thread, cur, true).as_bool();
+        let attached =
+            fg_thread != 0 && fg_thread != cur && AttachThreadInput(fg_thread, cur, true).as_bool();
         let ok = SetForegroundWindow(hwnd).as_bool();
         let _ = SetFocus(Some(hwnd));
         if attached {
@@ -497,7 +482,7 @@ fn makelong(lo: i32, hi: i32) -> u32 {
 /// 把光标点夹取到所在显示器工作区，使 w×h（物理像素）的窗口完整可见。
 fn clamp_to_work_area(pt: POINT, w: f32, h: f32) -> (i32, i32) {
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     };
     unsafe {
         let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -544,8 +529,13 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let state = &*ptr;
             let host = state.hwnd;
             if active {
-                state.menu_ever_active.store(true, std::sync::atomic::Ordering::Relaxed);
-            } else if state.menu_ever_active.load(std::sync::atomic::Ordering::Relaxed) {
+                state
+                    .menu_ever_active
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            } else if state
+                .menu_ever_active
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 let _ = PostMessageW(Some(host), WM_APP_CLOSE_MENU, WPARAM(0), LPARAM(0));
             }
             LRESULT(0)
@@ -560,7 +550,11 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let (x, y) = dip_from_lp(hwnd, lp);
             let h = hover_at(x, y, state.model.devs.len());
             if state.debug {
-                eprintln!("[mss-debug] menu mm raw={:#x} ({x:.0},{y:.0}) hover={h:?} scale={}", lp.0, dpi_scale(hwnd));
+                eprintln!(
+                    "[mss-debug] menu mm raw={:#x} ({x:.0},{y:.0}) hover={h:?} scale={}",
+                    lp.0,
+                    dpi_scale(hwnd)
+                );
             }
             if h != state.hover {
                 state.hover = h;
@@ -597,7 +591,7 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let state = &mut *ptr;
             let (x, y) = dip_from_lp(hwnd, lp);
             state.pressed = match hover_at(x, y, state.model.devs.len()) {
-                Some(h @ (Hover::Reset | Hover::ScrollMode | Hover::ScrollTrigger | Hover::Autostart | Hover::Exit)) => Some(h),
+                Some(h @ (Hover::Reset | Hover::Autostart | Hover::Exit)) => Some(h),
                 _ => None,
             };
             if state.pressed.is_some() {
@@ -623,22 +617,15 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             }
             match wp.0 as u32 {
                 k if k == VK_ESCAPE.0 as u32 => {
-                    // 录入态：Esc 只取消录入，不关菜单
-                    if unsafe { (*ptr).model.capturing } {
-                        super::scroll_hook::cancel_capture();
-                        unsafe { (*ptr).model.capturing = false };
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                    } else {
-                        if unsafe { (*ptr).debug } {
-                            eprintln!("[mss-debug] Esc -> close request");
-                        }
-                        let _ = PostMessageW(
-                            Some(super::host::host_hwnd(ptr)),
-                            WM_APP_CLOSE_MENU,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
+                    if unsafe { (*ptr).debug } {
+                        eprintln!("[mss-debug] Esc -> close request");
                     }
+                    let _ = PostMessageW(
+                        Some(super::host::host_hwnd(ptr)),
+                        WM_APP_CLOSE_MENU,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
                 }
                 k if k == VK_RETURN.0 as u32 || k == VK_SPACE.0 as u32 => {
                     let actions = unsafe { (*ptr).model.kb_activate() };
@@ -673,20 +660,27 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let state = &mut *ptr;
             let notify = (wp.0 & 0xFFFF) as u32;
             if state.trackbar.map(|h| h.0 as isize) == Some(lp.0) {
-                let pos =
-                    unsafe { SendMessageW(state.trackbar.unwrap(), TBM_GETPOS, Some(WPARAM(0)), Some(LPARAM(0))).0 }
-                        as i32;
+                let pos = unsafe {
+                    SendMessageW(
+                        state.trackbar.unwrap(),
+                        TBM_GETPOS,
+                        Some(WPARAM(0)),
+                        Some(LPARAM(0)),
+                    )
+                    .0
+                } as i32;
                 handle_slider_event(state, notify, pos, false);
             } else if state.wheel_trackbar.map(|h| h.0 as isize) == Some(lp.0) {
                 let pos = unsafe {
-                    SendMessageW(state.wheel_trackbar.unwrap(), TBM_GETPOS, Some(WPARAM(0)), Some(LPARAM(0))).0
+                    SendMessageW(
+                        state.wheel_trackbar.unwrap(),
+                        TBM_GETPOS,
+                        Some(WPARAM(0)),
+                        Some(LPARAM(0)),
+                    )
+                    .0
                 } as i32;
                 handle_slider_event(state, notify, pos, true);
-            } else if state.scroll_trackbar.map(|h| h.0 as isize) == Some(lp.0) {
-                let pos = unsafe {
-                    SendMessageW(state.scroll_trackbar.unwrap(), TBM_GETPOS, Some(WPARAM(0)), Some(LPARAM(0))).0
-                } as i32;
-                handle_scroll_slider_event(state, notify, pos);
             }
             LRESULT(0)
         }
@@ -695,13 +689,18 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 }
 
 /// 滑块子类：Esc/Q 转发给宿主（滑块获得焦点后主菜单收不到键盘）。
-/// 子类 id 3/4 = 子菜单的指针/滚轮滑块：父窗口收不到子控件上的鼠标事件，
+/// 子类 id 3/4/5 = 子菜单的指针/滚轮/滚轮灵敏度滑块：父窗口收不到子控件上的鼠标事件，
 /// 需在子控件上单独登记 leave，光标从滑块直接移出子菜单窗口时通知宿主
 /// （WM_APP_SUB_LEFT）。
 pub(crate) unsafe extern "system" fn trackbar_proc(
-    hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, uid: usize, data: usize,
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    uid: usize,
+    data: usize,
 ) -> LRESULT {
-    if uid == 3 || uid == 4 {
+    if uid == 3 || uid == 4 || uid == 5 {
         if msg == WM_MOUSEMOVE {
             let mut tme = TRACKMOUSEEVENT {
                 cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -721,11 +720,21 @@ pub(crate) unsafe extern "system" fn trackbar_proc(
         }
     }
     if msg == WM_KEYDOWN && wp.0 as u32 == VK_ESCAPE.0 as u32 {
-        let _ = PostMessageW(Some(HWND(data as *mut c_void)), WM_APP_CLOSE_MENU, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(
+            Some(HWND(data as *mut c_void)),
+            WM_APP_CLOSE_MENU,
+            WPARAM(0),
+            LPARAM(0),
+        );
         return LRESULT(0);
     }
     if msg == WM_CHAR && (wp.0 as u8 == b'q' || wp.0 as u8 == b'Q') {
-        let _ = PostMessageW(Some(HWND(data as *mut c_void)), win::WM_CLOSE, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(
+            Some(HWND(data as *mut c_void)),
+            win::WM_CLOSE,
+            WPARAM(0),
+            LPARAM(0),
+        );
         return LRESULT(0);
     }
     DefSubclassProc(hwnd, msg, wp, lp)
@@ -775,51 +784,39 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             invalidate_state(state);
             true // 不关闭菜单（与旧版一致）
         }
-        MenuAction::ToggleScrollMode => {
-            state.app.cfg.scroll.enabled = !state.app.cfg.scroll.enabled;
-            let on = state.app.cfg.scroll.enabled;
-            let _ = crate::config::save(&state.app.cfg);
-            super::scroll_hook::set_enabled(state, on);
-            state.model.scroll_on = on;
-            invalidate_state(state);
-            true // 不关闭菜单
-        }
-        MenuAction::CaptureTrigger => {
-            if state.model.capturing {
-                // 再点一次取消录入
-                super::scroll_hook::cancel_capture();
-                state.model.capturing = false;
-            } else {
-                super::scroll_hook::arm_capture(state);
-                state.model.capturing = true;
-            }
-            invalidate_state(state);
-            true // 不关闭菜单
-        }
-        MenuAction::SetScrollSens(v) => {
-            scroll_sens_set(state, v);
-            true
-        }
         MenuAction::SetRule(i) => {
             if let Some(d) = state.model.devs.get(i) {
                 if let (Some(v), Some(p)) = (d.vid.clone(), d.pid.clone()) {
-                    // 「用当前速度保存规则」：指针与滚轮都取当前系统值
+                    // 「用当前速度保存规则」：指针与滚轮都取当前系统值，滚轮模式保留旧值
                     let cur = crate::speed::get();
                     let wheel = crate::speed::get_wheel();
-                    state.app.cfg.set_rule(&v, &p, cur, Some(wheel), Some(d.name.clone()));
+                    let scroll = state
+                        .app
+                        .cfg
+                        .rule_for(&v, &p)
+                        .and_then(|r| r.scroll.clone());
+                    state
+                        .app
+                        .cfg
+                        .set_rule(&v, &p, cur, Some(wheel), scroll, Some(d.name.clone()));
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
+                    super::scroll_hook::sync(state);
                 }
             }
             false
         }
-        MenuAction::SetRuleWithSpeed(i, sp, wh) => {
+        MenuAction::SetRuleWithSpeed(i, sp, wh, scroll) => {
             if let Some(d) = state.model.devs.get(i) {
                 if let (Some(v), Some(p)) = (d.vid.clone(), d.pid.clone()) {
-                    // 「设为规则」按钮：指针与滚轮都取子菜单滑块值
-                    state.app.cfg.set_rule(&v, &p, sp, Some(wh), Some(d.name.clone()));
+                    // 「设为规则」按钮：指针、滚轮、滚轮模式都取子菜单本地值
+                    state
+                        .app
+                        .cfg
+                        .set_rule(&v, &p, sp, Some(wh), scroll, Some(d.name.clone()));
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
+                    super::scroll_hook::sync(state);
                 }
             }
             false
@@ -830,12 +827,14 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                     state.app.cfg.remove_rule(&v, &p);
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
+                    super::scroll_hook::sync(state);
                 }
             }
             false
         }
         MenuAction::Reapply(_) => {
             state.app.reapply();
+            super::scroll_hook::sync(state);
             false
         }
         MenuAction::Exit => {
@@ -906,47 +905,6 @@ fn handle_slider_event(state: &mut HostState, notify: u32, pos: i32, wheel: bool
     }
 }
 
-/// 滚轮灵敏度滑块事件分流（语义同 [`handle_slider_event`]，范围 5–200 像素/齿）。
-fn handle_scroll_slider_event(state: &mut HostState, notify: u32, pos: i32) {
-    match notify {
-        TB_THUMBTRACK => {
-            state.model.preview_scroll_px(pos);
-            invalidate_state(state);
-        }
-        TB_THUMBPOSITION | TB_ENDTRACK => {
-            if let Some(v) = state.model.commit_scroll_px() {
-                scroll_sens_set(state, v);
-            } else {
-                state.model.pending_scroll_px = None;
-                invalidate_state(state);
-            }
-        }
-        TB_LINEUP | TB_LINEDOWN | TB_PAGEUP | TB_PAGEDOWN | TB_TOP | TB_BOTTOM => {
-            let v = pos.clamp(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as u32;
-            state.model.pending_scroll_px = None;
-            if v != state.model.scroll_px {
-                scroll_sens_set(state, v);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// 滚轮灵敏度落盘 + 模型 + 滑块的单一入口。
-fn scroll_sens_set(state: &mut HostState, v: u32) {
-    let v = v.clamp(SCROLL_PX_MIN, SCROLL_PX_MAX);
-    state.app.cfg.scroll.px_per_notch = v;
-    let _ = crate::config::save(&state.app.cfg);
-    state.model.scroll_px = v;
-    state.model.pending_scroll_px = None;
-    if let Some(tb) = state.scroll_trackbar {
-        unsafe {
-            SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(v as isize)));
-        }
-    }
-    invalidate_state(state);
-}
-
 /// 指针速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
 fn speed_set(state: &mut HostState, v: u32) {
     crate::speed::set(v);
@@ -954,7 +912,12 @@ fn speed_set(state: &mut HostState, v: u32) {
     state.model.pending_speed = None;
     if let Some(tb) = state.trackbar {
         unsafe {
-            SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(state.model.speed_val as isize)));
+            SendMessageW(
+                tb,
+                TBM_SETPOS,
+                Some(WPARAM(1)),
+                Some(LPARAM(state.model.speed_val as isize)),
+            );
         }
     }
     sync_tip(state);
@@ -967,7 +930,12 @@ fn wheel_set(state: &mut HostState, v: u32) {
     state.model.pending_wheel = None;
     if let Some(tb) = state.wheel_trackbar {
         unsafe {
-            SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(state.model.wheel_val as isize)));
+            SendMessageW(
+                tb,
+                TBM_SETPOS,
+                Some(WPARAM(1)),
+                Some(LPARAM(state.model.wheel_val as isize)),
+            );
         }
     }
     sync_tip(state);
@@ -1021,7 +989,12 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         let pal = current_pal(state);
 
         // 背景 + 边框
-        let full = RECT { left: 0, top: 0, right: w, bottom: h };
+        let full = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
         let bg_brush = CreateSolidBrush(pal.bg);
         FillRect(hdc, &full, bg_brush);
         let _ = DeleteObject(bg_brush.into());
@@ -1035,7 +1008,11 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         // ── 标题行：指针速度: N + 恢复默认按钮 ──
         // 拖动中显示预览值（灰色提示尚未应用），松手才真正改系统速度
         let title_text = format!("指针速度: {}", model.display_speed());
-        let title_color = if model.pending_speed.is_some() { pal.gray } else { pal.text };
+        let title_color = if model.pending_speed.is_some() {
+            pal.gray
+        } else {
+            pal.text
+        };
         draw_text(hdc, &title_text, PAD, TITLE_H / 2.0, s, title_color);
 
         let (rl, rt, rr, rb) = reset_btn_rect();
@@ -1053,88 +1030,165 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         // 套 NULL_BRUSH 让它只描边
         let old_brush = SelectObject(
             hdc,
-            windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::NULL_BRUSH).into(),
+            windows::Win32::Graphics::Gdi::GetStockObject(
+                windows::Win32::Graphics::Gdi::NULL_BRUSH,
+            )
+            .into(),
         );
-        let _ = windows::Win32::Graphics::Gdi::Rectangle(hdc, btn.left, btn.top, btn.right, btn.bottom);
+        let _ =
+            windows::Win32::Graphics::Gdi::Rectangle(hdc, btn.left, btn.top, btn.right, btn.bottom);
         SelectObject(hdc, old_brush);
         SelectObject(hdc, old_pen);
         let _ = DeleteObject(pen.into());
-        let btn_color = if pressed_reset || hovered_reset { pal.hl_text } else { pal.text };
+        let btn_color = if pressed_reset || hovered_reset {
+            pal.hl_text
+        } else {
+            pal.text
+        };
         draw_text_center(hdc, "恢复默认", rl, rt, rr, rb, s, btn_color);
 
         // ── 滚轮标签行 + 滚轮滑块（真控件）──
         let wheel_text = format!("滚轮: {}", model.display_wheel());
-        let wheel_color = if model.pending_wheel.is_some() { pal.gray } else { pal.text };
-        draw_text(hdc, &wheel_text, PAD, wheel_label_top() + TITLE_H / 2.0, s, wheel_color);
-        sep(hdc, wheel_slider_top() + SLIDER_H, s, w, pal.sep);
-
-        // ── 滚轮模式：勾选行 + 触发键行 + 灵敏度标签 ──
-        {
-            let top = scroll_mode_top();
-            let hovered = state.hover == Some(Hover::ScrollMode);
-            let pressed = state.pressed == Some(Hover::ScrollMode);
-            let focused = model.kb_focus == Some(0);
-            let color = if hovered || pressed { pal.hl_text } else { pal.text };
-            draw_row_bg(hdc, top, ROW_H, s, w, hovered, pressed, focused, pal.highlight, pal.row_pressed);
-            if model.scroll_on {
-                draw_check(hdc, top + ROW_H / 2.0, s, color);
-            }
-            draw_text(hdc, "滚轮模式", PAD + CHECK_W, top + ROW_H / 2.0, s, color);
-        }
-        {
-            let top = scroll_trigger_top();
-            let hovered = state.hover == Some(Hover::ScrollTrigger);
-            let pressed = state.pressed == Some(Hover::ScrollTrigger);
-            let focused = model.kb_focus == Some(1);
-            let color = if hovered || pressed { pal.hl_text } else { pal.text };
-            draw_row_bg(hdc, top, ROW_H, s, w, hovered, pressed, focused, pal.highlight, pal.row_pressed);
-            let text = if model.capturing {
-                "触发键: 按下任意鼠标键…(Esc取消)".to_string()
-            } else {
-                format!("触发键: {}", model.scroll_trigger.label())
-            };
-            draw_text(hdc, &text, PAD + CHECK_W, top + ROW_H / 2.0, s, color);
-        }
-        let sens_text = format!("滚动灵敏度: {} 像素/齿", model.display_scroll_px());
-        let sens_color = if model.pending_scroll_px.is_some() { pal.gray } else { pal.text };
+        let wheel_color = if model.pending_wheel.is_some() {
+            pal.gray
+        } else {
+            pal.text
+        };
         draw_text(
             hdc,
-            &sens_text,
+            &wheel_text,
             PAD,
-            scroll_sens_label_top() + TITLE_H / 2.0,
+            wheel_label_top() + TITLE_H / 2.0,
             s,
-            sens_color,
+            wheel_color,
         );
-        sep(hdc, scroll_sens_slider_top() + SLIDER_H, s, w, pal.sep);
+        sep(hdc, wheel_slider_top() + SLIDER_H, s, w, pal.sep);
 
-        // ── 生效规则行 ──
+        // ── 生效规则：三行（规则名 / 两个速度 / 滚轮模式）──
         let eff_y = eff_row_top();
-        let eff_text = match &model.effective {
-            Some((name, sp)) => format!("生效规则: {name} (速度 {sp})"),
-            None => "生效规则: 无".to_string(),
-        };
-        draw_text(hdc, &eff_text, PAD, eff_y + INFO_ROW_H / 2.0, s, pal.gray);
+        match &model.effective {
+            Some(info) => {
+                let EffectiveInfo {
+                    name,
+                    speed,
+                    wheel,
+                    scroll,
+                } = info;
+                let wheel_str = wheel.map_or("保持".to_string(), |w| w.to_string());
+                let (scroll_on, scroll_trigger, scroll_px) = scroll
+                    .as_ref()
+                    .map_or((false, TriggerBtn::X1, SCROLL_PX_DEFAULT), |s| {
+                        (s.enabled, s.trigger, s.px_per_notch)
+                    });
+                let scroll_line = if scroll_on {
+                    format!(
+                        "滚轮模式: 开 · {} · {scroll_px} 像素/齿",
+                        scroll_trigger.label()
+                    )
+                } else {
+                    format!(
+                        "滚轮模式: 关 · {} · {scroll_px} 像素/齿",
+                        scroll_trigger.label()
+                    )
+                };
+                draw_text(
+                    hdc,
+                    &format!("生效规则: {name}"),
+                    PAD,
+                    eff_y + INFO_ROW_H / 2.0,
+                    s,
+                    pal.gray,
+                );
+                draw_text(
+                    hdc,
+                    &format!("指针: {speed} · 滚轮: {wheel_str}"),
+                    PAD,
+                    eff_y + INFO_ROW_H * 1.5,
+                    s,
+                    pal.gray,
+                );
+                draw_text(
+                    hdc,
+                    &scroll_line,
+                    PAD,
+                    eff_y + INFO_ROW_H * 2.5,
+                    s,
+                    pal.gray,
+                );
+            }
+            None => {
+                draw_text(
+                    hdc,
+                    "生效规则: 无",
+                    PAD,
+                    eff_y + EFF_INFO_H / 2.0,
+                    s,
+                    pal.gray,
+                );
+            }
+        }
 
-        sep(hdc, eff_y + INFO_ROW_H, s, w, pal.sep);
+        sep(hdc, eff_y + EFF_INFO_H, s, w, pal.sep);
 
         // ── 设备行 ──
         if n == 0 {
-            let py = eff_y + INFO_ROW_H + SEP_H;
-            draw_text(hdc, "未检测到鼠标设备", PAD, py + INFO_ROW_H / 2.0, s, pal.gray);
+            let py = eff_y + EFF_INFO_H + SEP_H;
+            draw_text(
+                hdc,
+                "未检测到鼠标设备",
+                PAD,
+                py + INFO_ROW_H / 2.0,
+                s,
+                pal.gray,
+            );
         }
         for (i, d) in model.devs.iter().enumerate() {
             let top = device_row_top(i);
             let hovered = state.hover == Some(Hover::Device(i));
-            let focused = model.kb_focus == Some(2 + i);
+            let focused = model.kb_focus == Some(i);
             let color = if hovered { pal.hl_text } else { pal.text };
-            draw_row_bg(hdc, top, ROW_H, s, w, hovered, false, focused, pal.highlight, pal.row_pressed);
+            draw_row_bg(
+                hdc,
+                top,
+                ROW_H,
+                s,
+                w,
+                hovered,
+                false,
+                focused,
+                pal.highlight,
+                pal.row_pressed,
+            );
             if d.is_effective && d.rule_speed.is_some() {
                 draw_check(hdc, top + ROW_H / 2.0, s, color);
             }
             if d.rule_speed.is_some() {
                 draw_gear(hdc, top + ROW_H / 2.0, s, color);
             }
-            draw_text(hdc, &d.row_text(), PAD + CHECK_W + RULE_ICON_W, top + ROW_H / 2.0, s, color);
+            if d.rule_scroll.as_ref().map_or(false, |s| s.enabled) {
+                draw_text(
+                    hdc,
+                    "滚",
+                    PAD + CHECK_W + RULE_ICON_W,
+                    top + ROW_H / 2.0,
+                    s,
+                    color,
+                );
+            }
+            draw_text(
+                hdc,
+                &d.row_text(),
+                PAD + CHECK_W
+                    + RULE_ICON_W
+                    + if d.rule_scroll.is_some() {
+                        RULE_ICON_W
+                    } else {
+                        0.0
+                    },
+                top + ROW_H / 2.0,
+                s,
+                color,
+            );
         }
 
         let auto_top = autostart_row_top(n);
@@ -1144,13 +1198,35 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         {
             let hovered = state.hover == Some(Hover::Autostart);
             let pressed = state.pressed == Some(Hover::Autostart);
-            let focused = model.kb_focus == Some(n + 2);
-            let color = if hovered || pressed { pal.hl_text } else { pal.text };
-            draw_row_bg(hdc, auto_top, ROW_H, s, w, hovered, pressed, focused, pal.highlight, pal.row_pressed);
+            let focused = model.kb_focus == Some(n);
+            let color = if hovered || pressed {
+                pal.hl_text
+            } else {
+                pal.text
+            };
+            draw_row_bg(
+                hdc,
+                auto_top,
+                ROW_H,
+                s,
+                w,
+                hovered,
+                pressed,
+                focused,
+                pal.highlight,
+                pal.row_pressed,
+            );
             if model.autostart_on {
                 draw_check(hdc, auto_top + ROW_H / 2.0, s, color);
             }
-            draw_text(hdc, "开机自启", PAD + CHECK_W, auto_top + ROW_H / 2.0, s, color);
+            draw_text(
+                hdc,
+                "开机自启",
+                PAD + CHECK_W,
+                auto_top + ROW_H / 2.0,
+                s,
+                color,
+            );
         }
 
         let exit_top = exit_row_top(n);
@@ -1160,9 +1236,24 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         {
             let hovered = state.hover == Some(Hover::Exit);
             let pressed = state.pressed == Some(Hover::Exit);
-            let focused = model.kb_focus == Some(n + 3);
-            let color = if hovered || pressed { pal.hl_text } else { pal.text };
-            draw_row_bg(hdc, exit_top, ROW_H, s, w, hovered, pressed, focused, pal.highlight, pal.row_pressed);
+            let focused = model.kb_focus == Some(n + 1);
+            let color = if hovered || pressed {
+                pal.hl_text
+            } else {
+                pal.text
+            };
+            draw_row_bg(
+                hdc,
+                exit_top,
+                ROW_H,
+                s,
+                w,
+                hovered,
+                pressed,
+                focused,
+                pal.highlight,
+                pal.row_pressed,
+            );
             draw_text(hdc, "退出", PAD + CHECK_W, exit_top + ROW_H / 2.0, s, color);
         }
 
@@ -1181,8 +1272,16 @@ fn rect_px(l: f32, t: f32, r: f32, b: f32, s: f32) -> RECT {
 
 /// 行背景：悬停整行高亮；按压用更深一档的颜色；键盘焦点画系统焦点框。
 fn draw_row_bg(
-    hdc: HDC, top_dip: f32, h_dip: f32, s: f32, w: i32,
-    hovered: bool, pressed: bool, focused: bool, highlight: COLORREF, row_pressed: COLORREF,
+    hdc: HDC,
+    top_dip: f32,
+    h_dip: f32,
+    s: f32,
+    w: i32,
+    hovered: bool,
+    pressed: bool,
+    focused: bool,
+    highlight: COLORREF,
+    row_pressed: COLORREF,
 ) {
     unsafe {
         let r = RECT {
@@ -1215,7 +1314,7 @@ fn sep(hdc: HDC, y_dip: f32, s: f32, w: i32, sep_color: COLORREF) {
 }
 
 /// 对勾（与 egui 版同形状：左中 → 下中 → 右上，2px）。
-fn draw_check(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
+pub(crate) fn draw_check(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
     unsafe {
         let cx = (PAD + CHECK_W / 2.0) * s;
         let cy = cy_dip * s;
@@ -1281,16 +1380,35 @@ pub(crate) fn draw_text(hdc: HDC, text: &str, x_dip: f32, cy_dip: f32, s: f32, c
             right: (MENU_W * s).round() as i32,
             bottom: ((cy_dip + 12.0) * s).round() as i32,
         };
-        let _ = DrawTextW(hdc, &mut w16, &mut rc, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX);
+        let _ = DrawTextW(
+            hdc,
+            &mut w16,
+            &mut rc,
+            DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
+        );
     }
 }
 
 /// 矩形内居中文本（按钮用）。
-pub(crate) fn draw_text_center(hdc: HDC, text: &str, l: f32, t: f32, r: f32, b: f32, s: f32, color: COLORREF) {
+pub(crate) fn draw_text_center(
+    hdc: HDC,
+    text: &str,
+    l: f32,
+    t: f32,
+    r: f32,
+    b: f32,
+    s: f32,
+    color: COLORREF,
+) {
     unsafe {
         SetTextColor(hdc, color);
         let mut w16: Vec<u16> = text.encode_utf16().collect();
         let mut rc = rect_px(l, t, r, b, s);
-        let _ = DrawTextW(hdc, &mut w16, &mut rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        let _ = DrawTextW(
+            hdc,
+            &mut w16,
+            &mut rc,
+            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+        );
     }
 }

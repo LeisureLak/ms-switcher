@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
-use windows::core::GUID;
 use windows::Win32::Devices::DeviceAndDriverInstallation::*;
+use windows::core::GUID;
 
 /// GUID_DEVCLASS_MOUSE = {4d36e96f-e325-11ce-bfc1-08002be10318}
 const GUID_DEVCLASS_MOUSE: GUID = GUID {
@@ -28,8 +28,9 @@ pub struct Device {
 pub fn enumerate_mice() -> Vec<Device> {
     let mut out = Vec::new();
 
-    let hdev = match unsafe { SetupDiGetClassDevsW(Some(&GUID_DEVCLASS_MOUSE), None, None, DIGCF_PRESENT) }
-    {
+    let hdev = match unsafe {
+        SetupDiGetClassDevsW(Some(&GUID_DEVCLASS_MOUSE), None, None, DIGCF_PRESENT)
+    } {
         Ok(h) => h,
         Err(_) => return out,
     };
@@ -75,7 +76,11 @@ fn get_instance_id(hdev: HDEVINFO, data: &SP_DEVINFO_DATA) -> Option<String> {
     }
     // size 包含结尾 null，去掉它
     let len = (size as usize).min(buf.len());
-    let end = if len > 0 && buf[len - 1] == 0 { len - 1 } else { len };
+    let end = if len > 0 && buf[len - 1] == 0 {
+        len - 1
+    } else {
+        len
+    };
     String::from_utf16_lossy(&buf[..end]).into()
 }
 

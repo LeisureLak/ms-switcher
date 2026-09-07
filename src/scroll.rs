@@ -63,6 +63,24 @@ pub const SCROLL_PX_MIN: u32 = 5;
 pub const SCROLL_PX_MAX: u32 = 200;
 pub const SCROLL_PX_DEFAULT: u32 = 40;
 
+/// 设备的滚轮模式配置（按规则保存）：开/关 + 触发键 + 灵敏度。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrollCfg {
+    pub enabled: bool,
+    pub trigger: TriggerBtn,
+    pub px_per_notch: u32,
+}
+
+impl Default for ScrollCfg {
+    fn default() -> Self {
+        ScrollCfg {
+            enabled: false,
+            trigger: TriggerBtn::X1,
+            px_per_notch: SCROLL_PX_DEFAULT,
+        }
+    }
+}
+
 /// 纵向滚轮注入量累积器。
 ///
 /// 轨迹球位移精度远高于滚轮齿，按像素累积、攒够一齿注入一次；
@@ -100,12 +118,30 @@ impl WheelAccum {
 }
 
 /// 钩子侧的滚轮模式运行时状态（由宿主单线程持有，钩子回调同线程借用）。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ScrollEngine {
+    /// 当前生效规则是否启用了滚轮模式。
+    pub enabled: bool,
     /// 是否处于「按住触发键」的滚轮模式中。
     pub active: bool,
     /// 位移 → 齿累积器（位移源是 Raw Input 相对位移，见 win32/scroll_hook.rs）。
     pub accum: WheelAccum,
+    /// 当前生效规则的触发键。
+    pub trigger: TriggerBtn,
+    /// 当前生效规则的灵敏度（像素/齿）。
+    pub px_per_notch: u32,
+}
+
+impl Default for ScrollEngine {
+    fn default() -> Self {
+        ScrollEngine {
+            enabled: false,
+            active: false,
+            accum: WheelAccum::default(),
+            trigger: TriggerBtn::X1,
+            px_per_notch: SCROLL_PX_DEFAULT,
+        }
+    }
 }
 
 #[cfg(test)]

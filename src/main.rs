@@ -9,13 +9,13 @@
 //!   （见 win32/host.rs 所有权模型与踩坑规避）。
 
 use mouse_speed_switcher::win32::{self, host, tray};
-use mouse_speed_switcher::{config, menu_model, state::AppState, speed};
-use windows::core::w;
+use mouse_speed_switcher::{config, menu_model, speed, state::AppState};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::core::w;
 
 fn main() {
     // Per-Monitor V2：必须先于任何 HWND 创建
@@ -51,20 +51,15 @@ fn main() {
     state.dev_notify = win32::device_notify::MouseDevNotify::new(state.hwnd);
 
     // 初始 tooltip 与托盘图标
-    let rule = menu_model::effective_name(&state.app);
-    let tip = menu_model::tip_text(
-        speed::get(),
-        speed::get_wheel(),
-        rule.as_ref().map(|(n, s)| (n.as_str(), *s)),
-    );
+    let rule = menu_model::effective_info(&state.app);
+    let tip = menu_model::tip_text(speed::get(), speed::get_wheel(), rule.as_ref());
     state.tray = tray::Tray::new(state.hwnd, &tip);
     if state.tray.is_none() {
         return;
     }
 
-    // 滚轮模式（轨迹球特化）：配置开启时装载 WH_MOUSE_LL 常驻钩子
-    let scroll_enabled = state.app.cfg.scroll.enabled;
-    win32::scroll_hook::set_enabled(&mut state, scroll_enabled);
+    // 滚轮模式（轨迹球特化）：按当前生效规则同步 WH_MOUSE_LL 常驻钩子
+    win32::scroll_hook::sync(&mut state);
 
     // MSS_DEBUG_MENU=1：启动即弹出菜单（自动化冒烟测试用）
     if std::env::var("MSS_DEBUG_MENU").is_ok() {

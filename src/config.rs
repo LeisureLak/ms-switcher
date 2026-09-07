@@ -3,8 +3,11 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use crate::scroll::ScrollCfg;
+
 /// 一条灵敏度切换规则：当 VID:PID 匹配的设备插入时，把指针速度设为 `speed`，
-/// 若指定了 `wheel` 也把滚轮速度（行/齿）设为该值。
+/// 若指定了 `wheel` 也把滚轮速度（行/齿）设为该值；
+/// 滚轮模式（按住触发键移动转滚轮）也按规则单独配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     #[serde(default)]
@@ -16,6 +19,9 @@ pub struct Rule {
     /// 插入时应用的滚轮速度（1-100 行/齿）；None = 规则不改滚轮。
     #[serde(default)]
     pub wheel: Option<u32>,
+    /// 此规则是否启用滚轮模式及对应配置；None = 规则不带滚轮模式。
+    #[serde(default)]
+    pub scroll: Option<ScrollCfg>,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -24,41 +30,31 @@ fn default_speed() -> u32 {
     10
 }
 
-/// 滚轮模式配置：按住触发键时鼠标移动转为纵向滚轮，松开恢复。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScrollCfg {
-    /// 功能总开关。
-    #[serde(default)]
-    pub enabled: bool,
-    /// 触发键（默认侧键1）。
-    #[serde(default)]
-    pub trigger: crate::scroll::TriggerBtn,
-    /// 灵敏度（像素/齿，5–200，越小越灵敏）。
-    #[serde(default = "default_scroll_px")]
-    pub px_per_notch: u32,
-}
-
-impl Default for ScrollCfg {
-    fn default() -> Self {
-        ScrollCfg {
-            enabled: false,
-            trigger: crate::scroll::TriggerBtn::default(),
-            px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
-        }
-    }
-}
-
-fn default_scroll_px() -> u32 {
-    crate::scroll::SCROLL_PX_DEFAULT
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub rules: Vec<Rule>,
-    /// 旧配置缺失时用默认值（功能关、侧键1、40 像素/齿）。
-    #[serde(default)]
-    pub scroll: ScrollCfg,
+}
+
+impl Rule {
+    /// 滚轮模式是否启用。
+    pub fn scroll_enabled(&self) -> bool {
+        self.scroll.as_ref().map_or(false, |s| s.enabled)
+    }
+
+    /// 滚轮模式触发键（规则未配置时取默认侧键1）。
+    pub fn scroll_trigger(&self) -> crate::scroll::TriggerBtn {
+        self.scroll
+            .as_ref()
+            .map_or(crate::scroll::TriggerBtn::X1, |s| s.trigger)
+    }
+
+    /// 滚轮模式灵敏度（规则未配置时取默认 40）。
+    pub fn scroll_px(&self) -> u32 {
+        self.scroll
+            .as_ref()
+            .map_or(crate::scroll::SCROLL_PX_DEFAULT, |s| s.px_per_notch)
+    }
 }
 
 impl Config {
@@ -68,13 +64,14 @@ impl Config {
             .find(|r| r.vid.eq_ignore_ascii_case(vid) && r.pid.eq_ignore_ascii_case(pid))
     }
 
-    /// 设置（或更新）一条规则；返回该规则最终的速度。
+    /// 设置（或更新）一条规则。
     pub fn set_rule(
         &mut self,
         vid: &str,
         pid: &str,
         speed: u32,
         wheel: Option<u32>,
+        scroll: Option<ScrollCfg>,
         note: Option<String>,
     ) {
         if let Some(r) = self
@@ -84,6 +81,7 @@ impl Config {
         {
             r.speed = speed;
             r.wheel = wheel;
+            r.scroll = scroll;
             r.note = note;
         } else {
             self.rules.push(Rule {
@@ -91,6 +89,7 @@ impl Config {
                 pid: pid.to_ascii_uppercase(),
                 speed,
                 wheel,
+                scroll,
                 note,
             });
         }
@@ -98,9 +97,8 @@ impl Config {
 
     pub fn remove_rule(&mut self, vid: &str, pid: &str) -> bool {
         let before = self.rules.len();
-        self.rules.retain(|r| {
-            !(r.vid.eq_ignore_ascii_case(vid) && r.pid.eq_ignore_ascii_case(pid))
-        });
+        self.rules
+            .retain(|r| !(r.vid.eq_ignore_ascii_case(vid) && r.pid.eq_ignore_ascii_case(pid)));
         self.rules.len() != before
     }
 }

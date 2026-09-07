@@ -9,8 +9,10 @@
 //!   把光标冻结后，系统会生成把位置拉回真实光标的补偿移动——在回调里
 //!   表现为反向位移，注入反向滚轮 = 滚动回弹（踩坑 四-17）。Raw Input
 //!   由 HID 栈直接产生，与钩子吞移动互不影响，无弹道/钳制/补偿事件。
-//! - **触发键录入**：菜单点「触发键」后进入录入态，下一个落在**菜单之外**的
-//!   鼠标键成为触发键（该次按下被吞掉）；点菜单内任意处取消录入。
+//! - **触发键录入**：菜单点「触发键」后进入录入态，下一个鼠标键成为触发键
+//!   （该次按下被吞掉）；菜单内按**左/右键**视为取消，中键/侧键不与菜单
+//!   交互、原地按下照常录入；菜单外任意键均录入。录入结束的那次点击经
+//!   `CAPTURE_END_TIME` 时间戳标记，菜单关闭钩子据此豁免、不误关菜单。
 //!
 //! 纪律（踩坑 三-1 / 性能基线 / 四-16）：
 //! - 钩子回调与消息循环同线程（系统经消息泵回调），经 `HOST_PTR` 直接借用
@@ -24,25 +26,26 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
-    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, MSLLHOOKSTRUCT, PostMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, LLMHF_INJECTED, WH_MOUSE_LL,
-    WM_MOUSEMOVE, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CallNextHookEx, GetWindowRect, HHOOK, LLMHF_INJECTED, MSLLHOOKSTRUCT, PostMessageW,
+    SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEMOVE, WM_XBUTTONDOWN,
+    WM_XBUTTONUP,
 };
 
 use super::host::HostState;
-use crate::scroll::TriggerBtn;
+use crate::scroll::{ScrollCfg, TriggerBtn};
 
 /// 录入完成/取消通知（应用私有消息）。wParam = 1 表示已录入新触发键（结果在
 /// 静态量里，宿主经 `take_capture_result` 取），0 表示取消。
@@ -67,6 +70,13 @@ static PENDING_WHEEL: AtomicI32 = AtomicI32::new(0);
 static INJECT_POSTED: AtomicBool = AtomicBool::new(false);
 /// Raw Input 鼠标源是否已注册（`RIDEV_INPUTSINK` → 宿主窗口后台收 `WM_INPUT`）。
 static RAW_REGISTERED: AtomicBool = AtomicBool::new(false);
+/// 「结束录入」事件的 `MSLLHOOKSTRUCT.time`（GetMessageTime 口径）。
+/// 录入经一次按键按下结束，同一次点击随后还会到达菜单关闭钩子
+/// （host.rs）——两个钩子调用次序不定，若本钩子先跑并清掉 CAPTURING，
+/// 关闭钩子会把这次「菜单外按下」误判为点击外部而关闭菜单：菜单一关，
+/// 刚录入到子菜单预览里的触发键随之丢失。记录时间戳让关闭钩子认出并
+/// 豁免这唯一一次事件。
+static CAPTURE_END_TIME: AtomicU32 = AtomicU32::new(0);
 
 /// 安装/卸载钩子与 Raw Input 源（功能开关变化时调用）。
 pub fn set_enabled(state: &mut HostState, on: bool) {
@@ -78,6 +88,21 @@ pub fn set_enabled(state: &mut HostState, on: bool) {
         state.scroll.active = false;
         uninstall();
     }
+}
+
+/// 与当前生效规则同步滚轮模式开关。
+pub fn sync(state: &mut HostState) {
+    let on = effective_scroll(state).is_some();
+    set_enabled(state, on);
+}
+
+/// 取当前生效规则的滚轮模式配置（仅 enabled 时有效）。
+fn effective_scroll(state: &HostState) -> Option<ScrollCfg> {
+    state
+        .app
+        .effective_rule()
+        .and_then(|(_, r)| r.scroll.clone())
+        .filter(|s| s.enabled)
 }
 
 fn install(state: &mut HostState) {
@@ -159,10 +184,7 @@ fn unregister_raw_input() {
 /// 运行在普通消息处理上下文；与钩子回调一样只累积 + 投递，注入统一走
 /// `flush_pending_wheel`。
 pub fn on_raw_input(state: &mut HostState, lp: LPARAM) {
-    if !state.scroll.active
-        || !state.app.cfg.scroll.enabled
-        || MENU_OPEN.load(Ordering::Acquire)
-    {
+    if !state.scroll.active || MENU_OPEN.load(Ordering::Acquire) {
         return;
     }
     let mut raw = RAWINPUT::default();
@@ -185,10 +207,8 @@ pub fn on_raw_input(state: &mut HostState, lp: LPARAM) {
     if m.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || m.lLastY == 0 {
         return;
     }
-    let px = state
-        .app
-        .cfg
-        .scroll
+    let scroll = effective_scroll(state).unwrap();
+    let px = scroll
         .px_per_notch
         .clamp(crate::scroll::SCROLL_PX_MIN, crate::scroll::SCROLL_PX_MAX) as f32;
     let units = state.scroll.accum.feed(m.lLastY as f32, px);
@@ -213,6 +233,19 @@ pub fn arm_capture(state: &mut HostState) {
 /// 取消录入态（静默；宿主侧自行刷新模型）。
 pub fn cancel_capture() {
     CAPTURING.store(false, Ordering::Release);
+}
+
+/// 录入态被一次按下事件结束（录入成功或取消）：退出录入态并记录该事件的
+/// 时间戳，供菜单关闭钩子豁免同一次点击（见 `CAPTURE_END_TIME`）。
+fn finish_capture(event_time: u32) {
+    CAPTURE_END_TIME.store(event_time, Ordering::Release);
+    cancel_capture();
+}
+
+/// 该时间戳的事件是否就是「结束录入」的那次按键。菜单关闭钩子用它豁免
+/// 这次点击，与两个钩子的调用次序无关。
+pub fn is_capture_end_event(event_time: u32) -> bool {
+    CAPTURE_END_TIME.load(Ordering::Acquire) == event_time
 }
 
 /// 当前是否在录入态（菜单绘制/关菜单钩子判断用）。
@@ -276,13 +309,7 @@ fn queue_wheel(state: &HostState, units: i32) {
     PENDING_WHEEL.fetch_add(units, Ordering::Relaxed);
     if !INJECT_POSTED.swap(true, Ordering::AcqRel) {
         let posted = unsafe {
-            PostMessageW(
-                Some(state.hwnd),
-                WM_APP_SCROLL_INJECT,
-                WPARAM(0),
-                LPARAM(0),
-            )
-            .is_ok()
+            PostMessageW(Some(state.hwnd), WM_APP_SCROLL_INJECT, WPARAM(0), LPARAM(0)).is_ok()
         };
         if !posted {
             // 投递失败（罕见，如队列满）：复位标志，让下一次累积能重新投递
@@ -345,55 +372,87 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
             if info.flags & LLMHF_INJECTED == 0 {
                 if CAPTURING.load(Ordering::Acquire) {
                     if is_button_down_msg(msg) {
-                        // 任何鼠标键都直接录入（无论光标在哪，按下即吞掉，
-                        // 不交给菜单）；取消只有 Esc 一种方式，零歧义
-                        if let Some(t) = trigger_from(msg, info.mouseData) {
-                            // 一次性：录入成功立即退出录入态（否则后续
-                            // 任意按键都会被当成新触发键覆盖掉）
-                            cancel_capture();
-                            // 结果经消息参数传递（不存静态量，防菜单关闭时被清）
-                            notify_host(state, true, t.code());
+                        // 录入：菜单内按左/右键视为取消（用户是想与菜单交互）；
+                        // 中键/侧键不与菜单交互，原地按下照常录入——「点录入
+                        // →原地按侧键」是最自然的手势，不该被静默取消。
+                        // 菜单外按任意键 = 录入。取消也通知宿主刷新。
+                        let inside = is_pt_in_menu(&info.pt, state);
+                        match (inside, trigger_from(msg, info.mouseData)) {
+                            (true, Some(TriggerBtn::Left | TriggerBtn::Right)) | (true, None) => {
+                                finish_capture(info.time);
+                                if state.debug {
+                                    eprintln!("[mss-debug] scroll capture cancelled (inside menu)");
+                                }
+                                notify_host(state, false, 0);
+                                return LRESULT(1);
+                            }
+                            (_, Some(t)) => {
+                                // 一次性：录入成功立即退出录入态（否则后续
+                                // 任意按键都会被当成新触发键覆盖掉）
+                                finish_capture(info.time);
+                                // 结果经消息参数传递（不存静态量，防菜单关闭时被清）
+                                notify_host(state, true, t.code());
+                                if state.debug {
+                                    eprintln!("[mss-debug] scroll capture recorded {:?}", t);
+                                }
+                                return LRESULT(1);
+                            }
+                            (false, None) => {}
+                        }
+                    }
+                } else if !MENU_OPEN.load(Ordering::Acquire) {
+                    if let Some(scroll) = effective_scroll(state) {
+                        let t = scroll.trigger;
+                        if matches_down(msg, info.mouseData, t) {
+                            // 进入滚轮模式：吞掉触发键按下。位移源是 Raw Input，
+                            // 这里不再记基准点（见模块头注释 / 踩坑 四-17）
+                            state.scroll.accum.reset();
+                            state.scroll.active = true;
                             if state.debug {
-                                eprintln!("[mss-debug] scroll capture recorded {:?}", t);
+                                eprintln!(
+                                    "[mss-debug] scroll mode ON (raw input, {} px/notch)",
+                                    scroll.px_per_notch
+                                );
                             }
                             return LRESULT(1);
                         }
-                    }
-                } else if !MENU_OPEN.load(Ordering::Acquire)
-                    && state.app.cfg.scroll.enabled
-                {
-                    let t = state.app.cfg.scroll.trigger;
-                    if matches_down(msg, info.mouseData, t) {
-                        // 进入滚轮模式：吞掉触发键按下。位移源是 Raw Input，
-                        // 这里不再记基准点（见模块头注释 / 踩坑 四-17）
-                        state.scroll.accum.reset();
-                        state.scroll.active = true;
-                        if state.debug {
-                            eprintln!("[mss-debug] scroll mode ON (raw input, {} px/notch)", state.app.cfg.scroll.px_per_notch);
-                        }
-                        return LRESULT(1);
-                    }
-                    if state.scroll.active {
-                        if matches_up(msg, info.mouseData, t) {
-                            state.scroll.active = false;
-                            if state.debug {
-                                eprintln!("[mss-debug] scroll mode OFF");
+                        if state.scroll.active {
+                            if matches_up(msg, info.mouseData, t) {
+                                state.scroll.active = false;
+                                if state.debug {
+                                    eprintln!("[mss-debug] scroll mode OFF");
+                                }
+                                return LRESULT(1);
                             }
-                            return LRESULT(1);
+                            if msg == WM_MOUSEMOVE {
+                                // 移动被吞：指针冻结。这里的 pt 不可用作位移
+                                // （冻结光标后系统会补偿/钳制，见踩坑 四-17），
+                                // Y 位移由 WM_INPUT → on_raw_input 提供。
+                                return LRESULT(1);
+                            }
+                            // 其余按键/滚轮消息照常放行
                         }
-                        if msg == WM_MOUSEMOVE {
-                            // 移动被吞：指针冻结。这里的 pt 不可用作位移
-                            // （冻结光标后系统会补偿/钳制，见踩坑 四-17），
-                            // Y 位移由 WM_INPUT → on_raw_input 提供。
-                            return LRESULT(1);
-                        }
-                        // 其余按键/滚轮消息照常放行
                     }
                 }
             }
         }
     }
     CallNextHookEx(None, code, wp, lp)
+}
+
+/// 检查屏幕点是否位于主菜单或子菜单窗口内。
+fn is_pt_in_menu(pt: &POINT, state: &HostState) -> bool {
+    let mut rc = RECT::default();
+    for hwnd in [state.menu, state.sub].iter().filter_map(|&h| h) {
+        unsafe {
+            if GetWindowRect(hwnd, &mut rc).is_ok() {
+                if pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// 录入结束 → 通知宿主线程收尾（落盘 / 刷新菜单模型）。

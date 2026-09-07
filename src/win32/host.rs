@@ -20,21 +20,21 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
-use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::Graphics::Gdi::{DeleteObject, InvalidateRect};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::TBM_SETPOS;
-use windows::Win32::UI::Shell::{NIM_SETFOCUS, Shell_NotifyIconW, NOTIFYICONDATAW};
+use windows::Win32::UI::Shell::{NIM_SETFOCUS, NOTIFYICONDATAW, Shell_NotifyIconW};
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetMessageW, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, MSLLHOOKSTRUCT,
-    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SendMessageW,
-    SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    CREATESTRUCTW, HHOOK, IDC_ARROW, MSG, WINDOW_EX_STYLE, WH_MOUSE_LL, WM_CLOSE,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_NCCREATE, WM_RBUTTONDOWN, WNDCLASSEXW,
+    CREATESTRUCTW, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, GetMessageW, GetWindowLongPtrW, GetWindowRect, HHOOK, IDC_ARROW, KillTimer,
+    LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
+    WM_LBUTTONDOWN, WM_NCCREATE, WM_RBUTTONDOWN, WNDCLASSEXW,
 };
+use windows::core::w;
 
 use super::device_notify::MouseDevNotify;
 use super::focus;
@@ -89,12 +89,12 @@ pub struct HostState {
     pub trackbar: Option<HWND>,
     /// 菜单内的滚轮速度 Trackbar 滑块子控件。
     pub wheel_trackbar: Option<HWND>,
-    /// 菜单内的滚轮灵敏度 Trackbar 滑块子控件（像素/齿）。
-    pub scroll_trackbar: Option<HWND>,
     /// 设备子菜单内的指针速度 Trackbar（本地预览，不直接改系统）。
     pub sub_trackbar: Option<HWND>,
     /// 设备子菜单内的滚轮速度 Trackbar（本地预览）。
     pub sub_wheel_trackbar: Option<HWND>,
+    /// 设备子菜单内的滚动灵敏度 Trackbar（本地预览）。
+    pub sub_scroll_trackbar: Option<HWND>,
     /// 菜单字体（按菜单窗口 DPI 创建，菜单关闭时销毁）。
     pub font: windows::Win32::Graphics::Gdi::HFONT,
     /// 设备子菜单窗口。
@@ -122,11 +122,6 @@ pub struct HostState {
 impl HostState {
     /// `app` 需已加载配置、枚举设备并应用过规则（见 native 入口）。
     pub fn new(app: AppState) -> Box<HostState> {
-        let (s_on, s_trig, s_px) = (
-            app.cfg.scroll.enabled,
-            app.cfg.scroll.trigger,
-            app.cfg.scroll.px_per_notch,
-        );
         Box::new(HostState {
             hwnd: HWND::default(),
             app,
@@ -134,9 +129,6 @@ impl HostState {
                 speed::get(),
                 speed::get_wheel(),
                 crate::autostart::is_enabled(),
-                s_on,
-                s_trig,
-                s_px,
             ),
             tray: None,
             menu: None,
@@ -144,9 +136,9 @@ impl HostState {
             menu_opening: false,
             trackbar: None,
             wheel_trackbar: None,
-            scroll_trackbar: None,
             sub_trackbar: None,
             sub_wheel_trackbar: None,
+            sub_scroll_trackbar: None,
             font: windows::Win32::Graphics::Gdi::HFONT::default(),
             sub: None,
             sub_dev: None,
@@ -254,7 +246,11 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
         WM_APP_CLOSE_MENU => {
             if state.debug {
-                eprintln!("[mss-debug] host got close request, menu={:?} opening={}", state.menu.is_some(), state.menu_opening);
+                eprintln!(
+                    "[mss-debug] host got close request, menu={:?} opening={}",
+                    state.menu.is_some(),
+                    state.menu_opening
+                );
             }
             close_menu(state);
             LRESULT(0)
@@ -279,19 +275,26 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_APP_SCROLL_CHANGED => {
-            // 触发键录入结束（钩子投递；wParam 1=已录入(lp=键码) 0=取消）
+            // 触发键录入结束（子菜单；wParam 1=已录入(lp=键码) 0=取消）
             if wp.0 == 1 {
                 if let Some(t) = crate::scroll::TriggerBtn::from_code(lp.0 as u32) {
-                    state.app.cfg.scroll.trigger = t;
-                    let _ = crate::config::save(&state.app.cfg);
-                    state.model.scroll_trigger = t;
+                    match &mut state.model.sub_scroll {
+                        Some(s) => s.trigger = t,
+                        None => {
+                            state.model.sub_scroll = Some(crate::scroll::ScrollCfg {
+                                enabled: true,
+                                trigger: t,
+                                px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
+                            });
+                        }
+                    }
                     if state.debug {
                         eprintln!("[mss-debug] scroll trigger captured: {:?}", t);
                     }
                 }
             }
             state.model.capturing = scroll_hook::is_capturing();
-            invalidate_menu(state);
+            invalidate_menus(state);
             LRESULT(0)
         }
         WM_APP_SUB_LEFT => {
@@ -313,7 +316,7 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 if state.model.sub_hover.is_none() {
                     submenu::close(state);
                 } else {
-                    invalidate_menu(state);
+                    invalidate_menus(state);
                 }
             }
             LRESULT(0)
@@ -342,15 +345,20 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 if let Some(tb) = state.trackbar {
                     SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur as isize)));
                 }
-                invalidate_menu(state);
+                invalidate_menus(state);
             }
             let cur_wheel = speed::get_wheel();
             if cur_wheel != state.model.wheel_val {
                 state.model.wheel_val = cur_wheel;
                 if let Some(tb) = state.wheel_trackbar {
-                    SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur_wheel as isize)));
+                    SendMessageW(
+                        tb,
+                        TBM_SETPOS,
+                        Some(WPARAM(1)),
+                        Some(LPARAM(cur_wheel as isize)),
+                    );
                 }
-                invalidate_menu(state);
+                invalidate_menus(state);
             }
             if cur != state.model.speed_val || cur_wheel != state.model.wheel_val {
                 sync_tip(state);
@@ -430,31 +438,36 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
     if code >= 0 {
         let msg = wp.0 as u32;
         if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
-            // 触发键录入期间菜单外按键是「录入」，不关菜单
-            if !super::scroll_hook::is_capturing() {
+            let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
+            // 触发键录入期间菜单外按键是「录入」，不关菜单。「结束录入的那次
+            // 点击」同样豁免：两个 LL 钩子的调用次序不定，滚轮钩子先跑时
+            // CAPTURING 已被清掉，得靠事件时间戳认出这次点击
+            // （scroll_hook::is_capture_end_event，见踩坑 四-19）。
+            if !super::scroll_hook::is_capturing()
+                && !super::scroll_hook::is_capture_end_event(info.time)
+            {
                 let host = HOOK_HOST.load(Ordering::Acquire);
                 if host != 0 {
-                let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
-                // 「点在弹出层内」只查自己的菜单/子菜单窗口矩形（本线程自有
-                // 窗口，无跨线程消息）。差异：若第三方置顶窗恰好压在菜单矩形上，
-                // 点击不再判为外部点击——菜单保持打开，可接受。
-                let ptr = GetWindowLongPtrW(HWND(host as *mut c_void), win::GWLP_USERDATA)
-                    as *const HostState;
-                let inside = !ptr.is_null() && {
-                    let s = &*ptr;
-                    [s.menu, s.sub]
-                        .into_iter()
-                        .flatten()
-                        .any(|h| point_in_window(h, info.pt))
-                };
-                if !inside {
-                    let _ = PostMessageW(
-                        Some(HWND(host as *mut c_void)),
-                        WM_APP_CLOSE_MENU,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
+                    // 「点在弹出层内」只查自己的菜单/子菜单窗口矩形（本线程自有
+                    // 窗口，无跨线程消息）。差异：若第三方置顶窗恰好压在菜单矩形上，
+                    // 点击不再判为外部点击——菜单保持打开，可接受。
+                    let ptr = GetWindowLongPtrW(HWND(host as *mut c_void), win::GWLP_USERDATA)
+                        as *const HostState;
+                    let inside = !ptr.is_null() && {
+                        let s = &*ptr;
+                        [s.menu, s.sub]
+                            .into_iter()
+                            .flatten()
+                            .any(|h| point_in_window(h, info.pt))
+                    };
+                    if !inside {
+                        let _ = PostMessageW(
+                            Some(HWND(host as *mut c_void)),
+                            WM_APP_CLOSE_MENU,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
                 }
             }
         }
@@ -468,7 +481,9 @@ fn toggle_menu(state: &mut HostState) {
         return;
     }
     if state.menu.is_some() {
-        unsafe { let _ = PostMessageW(Some(state.hwnd), WM_APP_CLOSE_MENU, WPARAM(0), LPARAM(0)); }
+        unsafe {
+            let _ = PostMessageW(Some(state.hwnd), WM_APP_CLOSE_MENU, WPARAM(0), LPARAM(0));
+        }
     } else {
         open_menu(state);
     }
@@ -512,15 +527,16 @@ pub fn close_menu(state: &mut HostState) {
     remove_mouse_close_hook();
     // 菜单关闭：滚轮模式恢复（录入态随 set_menu_open(false) 一并取消）
     scroll_hook::set_menu_open(false);
+    scroll_hook::sync(state);
     state.model.capturing = false;
     state.pressed = None;
     state.sub_pressed = None;
     if let Some(h) = state.menu.take() {
         state.trackbar = None;
         state.wheel_trackbar = None;
-        state.scroll_trackbar = None;
         state.sub_trackbar = None;
         state.sub_wheel_trackbar = None;
+        state.sub_scroll_trackbar = None;
         state.hover = None;
         if !state.font.0.is_null() {
             unsafe {
@@ -563,7 +579,7 @@ fn debounced_scan(state: &mut HostState) {
     state.app.apply_diff(&mice);
     let changed = state.model.devs.len() != mice.len();
     state.model.devs = menu_model::build_dev_rows(&mice, &state.app);
-    state.model.effective = menu_model::effective_name(&state.app);
+    state.model.effective = menu_model::effective_info(&state.app);
     if state.debug {
         eprintln!("[mss-debug] dev scan: {} mice", mice.len());
     }
@@ -572,13 +588,14 @@ fn debounced_scan(state: &mut HostState) {
         submenu::close(state);
         state.model.sub_hover = None;
     }
-    invalidate_menu(state);
+    invalidate_menus(state);
     sync_tip(state);
 }
 
-/// 菜单打开中则整体重绘。
-fn invalidate_menu(state: &HostState) {
-    if let Some(h) = state.menu {
+/// 菜单打开中则整体重绘。主菜单与子菜单都标脏：子菜单内容同样依赖模型
+/// （触发键录入结果、设备行启用态等），漏标会出现「模型已改但画面不变」。
+fn invalidate_menus(state: &HostState) {
+    for h in [state.menu, state.sub].into_iter().flatten() {
         unsafe {
             let _ = InvalidateRect(Some(h), None, false);
         }
@@ -587,12 +604,8 @@ fn invalidate_menu(state: &HostState) {
 
 /// 依当前速度与生效规则生成 tooltip；Tray 内部按文本去重后 NIM_MODIFY。
 pub fn sync_tip(state: &mut HostState) {
-    let rule = menu_model::effective_name(&state.app);
-    let tip = menu_model::tip_text(
-        speed::get(),
-        speed::get_wheel(),
-        rule.as_ref().map(|(n, s)| (n.as_str(), *s)),
-    );
+    let rule = menu_model::effective_info(&state.app);
+    let tip = menu_model::tip_text(speed::get(), speed::get_wheel(), rule.as_ref());
     if let Some(t) = state.tray.as_mut() {
         t.set_tip(&tip);
     }

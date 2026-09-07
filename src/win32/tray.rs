@@ -8,12 +8,12 @@
 use std::ffi::c_void;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
+    DeleteObject,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON, WM_APP,
@@ -79,17 +79,8 @@ fn hicon_from_rgba(size: u32, rgba: &[u8]) -> Option<HICON> {
         ..Default::default()
     };
     let mut bits: *mut c_void = std::ptr::null_mut();
-    let hbmp_color = unsafe {
-        CreateDIBSection(
-            None,
-            &bmi,
-            DIB_RGB_COLORS,
-            &mut bits,
-            None,
-            0,
-        )
-    }
-    .ok()?;
+    let hbmp_color =
+        unsafe { CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
     if bits.is_null() {
         return None;
     }
@@ -99,9 +90,19 @@ fn hicon_from_rgba(size: u32, rgba: &[u8]) -> Option<HICON> {
     // 掩码位图必须显式清零：CreateBitmap 不初始化位数据，残留垃圾会把
     // 像素整体掩掉（32bpp 图标虽有 alpha 通道，掩码仍需保证全透明明示）
     let mask_bits = vec![0u8; ((size + 15) / 16 * 2 * size) as usize];
-    let hbmp_mask = unsafe { CreateBitmap(size as i32, size as i32, 1, 1, Some(mask_bits.as_ptr() as *const c_void)) };
+    let hbmp_mask = unsafe {
+        CreateBitmap(
+            size as i32,
+            size as i32,
+            1,
+            1,
+            Some(mask_bits.as_ptr() as *const c_void),
+        )
+    };
     if hbmp_mask.is_invalid() {
-        unsafe { let _ = DeleteObject(hbmp_color.into()); }
+        unsafe {
+            let _ = DeleteObject(hbmp_color.into());
+        }
         return None;
     }
     let info = ICONINFO {
@@ -141,12 +142,13 @@ impl Tray {
         let size = tray_icon_size();
         let rgba = icon_rgba(size);
         let icon = hicon_from_rgba(size, &rgba)?;
-        let mut t = Tray { hwnd, icon, added: false, tip: String::new() };
-        if t.add(tip) {
-            Some(t)
-        } else {
-            None
-        }
+        let mut t = Tray {
+            hwnd,
+            icon,
+            added: false,
+            tip: String::new(),
+        };
+        if t.add(tip) { Some(t) } else { None }
     }
 
     fn nid(&self) -> NOTIFYICONDATAW {

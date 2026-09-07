@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::*;
+use windows::core::{PCWSTR, w};
 
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const VALUE_NAME: PCWSTR = w!("MouseSpeedSwitcher");
@@ -17,8 +17,7 @@ fn exe_path() -> String {
 pub fn is_enabled() -> bool {
     unsafe {
         let mut key = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, Some(0), KEY_READ, &mut key) != ERROR_SUCCESS
-        {
+        if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, Some(0), KEY_READ, &mut key) != ERROR_SUCCESS {
             return false;
         }
         let mut buf = [0u16; 1024];

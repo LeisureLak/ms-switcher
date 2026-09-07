@@ -19,16 +19,16 @@
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{HWND, LPARAM};
-use windows::core::BOOL;
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
     GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
     WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+use windows::core::BOOL;
 
 /// 不应作为归还目标的 Shell 顶层窗口类名（大小写不敏感）。
 const SHELL_CLASSES: &[&str] = &[
@@ -38,9 +38,9 @@ const SHELL_CLASSES: &[&str] = &[
     "TopLevelWindowForOverflowXamlIsland", // Win11 通知区域溢出浮层
     "Progman",                             // 桌面
     "WorkerW",
-    "MultitaskingViewFrame",               // 任务视图
-    "WindowsDashboard",                    // 小组件面板
-    "Xaml_WindowedPopupClass",             // Win11 XAML 弹层（快速设置等）
+    "MultitaskingViewFrame",   // 任务视图
+    "WindowsDashboard",        // 小组件面板
+    "Xaml_WindowedPopupClass", // Win11 XAML 弹层（快速设置等）
 ];
 
 fn class_name(hwnd: HWND) -> String {
@@ -130,7 +130,11 @@ fn dbg_log(msg: &str) {
     let Ok(t) = std::env::var("TEMP") else { return };
     let p = std::path::Path::new(&t).join("mss_focus.log");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
         let _ = writeln!(f, "{msg}");
     }
 }

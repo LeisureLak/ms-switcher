@@ -86,12 +86,12 @@ impl AppState {
         }
     }
 
-    /// 当前生效的规则设备（active 中最后插入的规则设备）及其规则速度。
-    pub fn effective_rule(&self) -> Option<(&Device, u32)> {
+    /// 当前生效的规则设备（active 中最后插入的规则设备）及其规则。
+    pub fn effective_rule(&self) -> Option<(&Device, &Rule)> {
         self.active
             .iter()
             .rev()
-            .find_map(|(_, d)| self.rule_for(d).map(|r| (d, r.speed)))
+            .find_map(|(_, d)| self.rule_for(d).map(|r| (d, r)))
     }
 
     /// 当前插入的设备中命中规则的个数。
@@ -163,6 +163,7 @@ mod tests {
             pid: pid.into(),
             speed,
             wheel: None,
+            scroll: None,
             note: None,
         }
     }
@@ -206,7 +207,6 @@ mod tests {
         let original_wheel = speed::get_wheel();
         let cfg = Config {
             rules: vec![rule("056E", "01C5", 4)],
-            scroll: Default::default(),
         };
         let st = AppState {
             cfg,
