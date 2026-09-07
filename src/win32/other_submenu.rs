@@ -34,7 +34,9 @@ use crate::menu_model::{
 };
 
 use super::host::{HostState, WM_APP_CLOSE_OTHER_SUBMENU};
-use super::menu::{apply_dwm, current_pal, dip_from_lp, dpi_scale, draw_row_bg, draw_text};
+use super::menu::{
+    apply_dwm, current_pal, dip_from_lp, dpi_scale, draw_row_bg, draw_sub_arrow, draw_text,
+};
 use super::submenu;
 
 const OTHER_SUB_CLASS: windows::core::PCWSTR = w!("MSS_OtherSubMenu");
@@ -349,6 +351,8 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
                     pal.row_pressed,
                 );
                 draw_text(mem, &d.row_text(), PAD, top + ROW_H / 2.0, s, color);
+                // 每行悬停展开单设备配置子菜单：右缘画展开指示
+                draw_sub_arrow(mem, OTHER_SUB_W - PAD, top + ROW_H / 2.0, s, color);
             }
         }
 

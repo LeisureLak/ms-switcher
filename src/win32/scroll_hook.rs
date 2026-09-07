@@ -4,7 +4,8 @@
 //! - **鼠标触发滚轮模式**：按住配置的鼠标触发键（默认侧键1）期间，钩子吞掉
 //!   WM_MOUSEMOVE 冻结指针；Y 位移改由 Raw Input 提供（宿主窗口收
 //!   `WM_INPUT` 读 `RAWMOUSE.lLastY`），经 [`crate::scroll::WheelAccum`]
-//!   攒齿后 `SendInput` 注入 `MOUSEEVENTF_WHEEL`；触发键抬起恢复原样。
+//!   累积、攒够一齿（像素/行 × 系统行每齿）后 `SendInput` 注入整齿
+//!   `MOUSEEVENTF_WHEEL`；触发键抬起恢复原样。
 //!   不能用钩子的 `pt` 求位移：`pt` 是**光标位置**而非原始位移，吞掉移动
 //!   把光标冻结后，系统会生成把位置拉回真实光标的补偿移动——在回调里
 //!   表现为反向位移，注入反向滚轮 = 滚动回弹（踩坑 四-17）。Raw Input
@@ -115,8 +116,8 @@ pub fn sync(state: &mut HostState) {
         state.scroll.enabled = true;
         state.scroll.trigger = scroll.trigger;
         state.scroll.kb_trigger = scroll.kb_trigger;
-        state.scroll.px_per_notch = scroll
-            .px_per_notch
+        state.scroll.px_per_line = scroll
+            .px_per_line
             .clamp(crate::scroll::SCROLL_PX_MIN, crate::scroll::SCROLL_PX_MAX);
         set_enabled(state, true);
         sync_kb_hook(state);
@@ -127,7 +128,7 @@ pub fn sync(state: &mut HostState) {
         state.scroll.enabled = false;
         state.scroll.trigger = TriggerBtn::X1;
         state.scroll.kb_trigger = None;
-        state.scroll.px_per_notch = crate::scroll::SCROLL_PX_DEFAULT;
+        state.scroll.px_per_line = crate::scroll::SCROLL_PX_DEFAULT;
         set_enabled(state, false);
         sync_kb_hook(state);
     }
@@ -277,7 +278,7 @@ fn unregister_raw_input() {
     }
 }
 
-/// 宿主收到 `WM_INPUT` 时调用：滚轮模式激活期间取 Raw Input 相对 Y 位移攒齿。
+/// 宿主收到 `WM_INPUT` 时调用：滚轮模式激活期间取 Raw Input 相对 Y 位移按行累积。
 /// 运行在普通消息处理上下文；与钩子回调一样只累积 + 投递，注入统一走
 /// `flush_pending_wheel`。
 pub fn on_raw_input(state: &mut HostState, lp: LPARAM) {
@@ -304,8 +305,19 @@ pub fn on_raw_input(state: &mut HostState, lp: LPARAM) {
     if m.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || m.lLastY == 0 {
         return;
     }
-    let px = state.scroll.px_per_notch as f32;
-    let units = state.scroll.accum.feed(m.lLastY as f32, px);
+    // 系统「每齿行数」决定一齿所需像素与每步滚动行数；逐事件现读，
+    // 本软件/系统里改滚轮速度立即生效。0 = 滚轮被禁用；
+    // u32::MAX = 一次滚动一屏，按 3 行/齿折算（攒满一齿换一页）。
+    let lines_per_notch = match crate::speed::get_wheel_lines_raw() {
+        0 => return,
+        u32::MAX => 3.0,
+        l => l as f32,
+    };
+    let px = state.scroll.px_per_line as f32;
+    let units = state
+        .scroll
+        .accum
+        .feed(m.lLastY as f32, px, lines_per_notch);
     if units != 0 {
         if state.debug {
             eprintln!("[mss-debug] scroll inject {units}");
@@ -503,7 +515,7 @@ pub fn flush_pending_wheel() {
     }
 }
 
-/// 注入一齿（或数齿）纵向滚轮。
+/// 注入一齿（或数齿）纵向滚轮（delta 为 120 的倍数，与真实滚轮一致）。
 fn inject_wheel(delta: i32) {
     let inp = INPUT {
         r#type: INPUT_MOUSE,
@@ -581,8 +593,8 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                         state.scroll.sync_active();
                         if state.debug {
                             eprintln!(
-                                "[mss-debug] scroll mode ON (raw input, {} px/notch)",
-                                state.scroll.px_per_notch
+                                "[mss-debug] scroll mode ON (raw input, {} px/line)",
+                                state.scroll.px_per_line
                             );
                         }
                         return LRESULT(1);

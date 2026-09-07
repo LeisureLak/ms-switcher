@@ -45,8 +45,10 @@ pub fn set(v: u32) {
     }
 }
 
-/// 读取当前滚轮速度（1-100 行/齿，Windows 设置中的滑块，默认 3）。
-pub fn get_wheel() -> u32 {
+/// 读取原始「每齿行数」（不夹取）：0 = 滚轮被系统禁用，
+/// u32::MAX（WHEEL_PAGESCROLL）= 一次滚动一屏。
+/// 滚轮模式按它把「行」换算成注入 delta，需要未夹取的原始值。
+pub fn get_wheel_lines_raw() -> u32 {
     let mut v: u32 = 0;
     unsafe {
         let _ = SystemParametersInfoW(
@@ -56,8 +58,13 @@ pub fn get_wheel() -> u32 {
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         );
     }
+    v
+}
+
+/// 读取当前滚轮速度（1-100 行/齿，Windows 设置中的滑块，默认 3）。
+pub fn get_wheel() -> u32 {
     // WHEEL_PAGESCROLL（每齿滚一屏）在设置 UI 之外；这里夹到常规范围
-    v.clamp(WHEEL_MIN, WHEEL_MAX)
+    get_wheel_lines_raw().clamp(WHEEL_MIN, WHEEL_MAX)
 }
 
 /// 设置滚轮速度（自动夹到 1-100 行/齿），即时生效并持久化。

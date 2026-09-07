@@ -308,7 +308,7 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                             enabled: true,
                             trigger: crate::scroll::TriggerBtn::X1,
                             kb_trigger: Some(crate::scroll::KbTrigger { vk }),
-                            px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
+                            px_per_line: crate::scroll::SCROLL_PX_DEFAULT,
                         });
                     }
                 }
@@ -332,7 +332,7 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                                 enabled: true,
                                 trigger: t,
                                 kb_trigger: None,
-                                px_per_notch: crate::scroll::SCROLL_PX_DEFAULT,
+                                px_per_line: crate::scroll::SCROLL_PX_DEFAULT,
                             });
                         }
                     }

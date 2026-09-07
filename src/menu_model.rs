@@ -641,18 +641,18 @@ impl MenuModel {
         self.sub_wheel = Some(v.clamp(1, 100) as u32);
     }
 
-    /// 子菜单滚动灵敏度预览（夹取 5–200）。
+    /// 子菜单滚动灵敏度预览（像素/行，夹取 2–200）。
     /// 如果 `sub_scroll` 不存在，创建一个默认关闭的配置。
     pub fn preview_sub_scroll_px(&mut self, v: i32) {
         let px = v.clamp(SCROLL_PX_MIN as i32, SCROLL_PX_MAX as i32) as u32;
         match &mut self.sub_scroll {
-            Some(s) => s.px_per_notch = px,
+            Some(s) => s.px_per_line = px,
             None => {
                 self.sub_scroll = Some(ScrollCfg {
                     enabled: true,
                     trigger: TriggerBtn::X1,
                     kb_trigger: None,
-                    px_per_notch: px,
+                    px_per_line: px,
                 });
             }
         }
@@ -667,7 +667,7 @@ impl MenuModel {
                     enabled: true,
                     trigger: TriggerBtn::X1,
                     kb_trigger: None,
-                    px_per_notch: SCROLL_PX_DEFAULT,
+                    px_per_line: SCROLL_PX_DEFAULT,
                 });
             }
         }
@@ -1028,10 +1028,10 @@ mod tests {
         m.toggle_sub_scroll();
         assert!(m.sub_scroll.as_ref().unwrap().enabled);
         m.preview_sub_scroll_px(0);
-        assert_eq!(m.sub_scroll.as_ref().unwrap().px_per_notch, 5, "下界夹取 5");
+        assert_eq!(m.sub_scroll.as_ref().unwrap().px_per_line, 2, "下界夹取 2");
         m.preview_sub_scroll_px(999);
         assert_eq!(
-            m.sub_scroll.as_ref().unwrap().px_per_notch,
+            m.sub_scroll.as_ref().unwrap().px_per_line,
             200,
             "上界夹取 200"
         );

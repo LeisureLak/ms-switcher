@@ -1,4 +1,4 @@
-//! 滚轮模式纯逻辑：触发键枚举与「像素位移 → 滚轮齿」累积器。
+//! 滚轮模式纯逻辑：触发键枚举与「像素位移 → 滚动行数」累积器。
 //!
 //! 不依赖任何 OS 类型，可脱离窗口单测；win32/scroll_hook.rs 只做
 //! 钩子事件 → 本模块调用的映射与 SendInput 副作用。
@@ -131,20 +131,25 @@ fn vk_label(vk: u32) -> String {
     }
 }
 
-/// 滚轮灵敏度取值范围与默认值（像素/齿：轨迹球滚动多少像素 = 一齿滚轮）。
-/// 值越小越灵敏。Win32 滚轮一齿 = WHEEL_DELTA(120)，在钩子层换算。
-pub const SCROLL_PX_MIN: u32 = 5;
+/// 滚轮灵敏度取值范围与默认值（像素/行：轨迹球滚动多少像素 = 滚动一行）。
+/// 值越小越灵敏。注入以整齿为最小单位：一齿 = 像素/行 × 系统「每齿行数」，
+/// 每步滚动精确等于系统行/齿（见 win32/scroll_hook.rs）。
+pub const SCROLL_PX_MIN: u32 = 2;
 pub const SCROLL_PX_MAX: u32 = 200;
-pub const SCROLL_PX_DEFAULT: u32 = 40;
+pub const SCROLL_PX_DEFAULT: u32 = 15;
 
 /// 设备的滚轮模式配置（按规则保存）：开/关 + 鼠标触发键 + 键盘触发键 + 灵敏度。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScrollCfg {
     pub enabled: bool,
     pub trigger: TriggerBtn,
     /// 可选的键盘开关键（单键，组合键触发时取消）。
     pub kb_trigger: Option<KbTrigger>,
-    pub px_per_notch: u32,
+    /// 灵敏度（像素/行）。兼容读取旧字段 `px_per_notch`（像素/齿）：
+    /// 旧值按新语义直接采用，不做数值换算。
+    #[serde(alias = "px_per_notch")]
+    pub px_per_line: u32,
 }
 
 impl Default for ScrollCfg {
@@ -153,15 +158,16 @@ impl Default for ScrollCfg {
             enabled: false,
             trigger: TriggerBtn::X1,
             kb_trigger: None,
-            px_per_notch: SCROLL_PX_DEFAULT,
+            px_per_line: SCROLL_PX_DEFAULT,
         }
     }
 }
 
 /// 纵向滚轮注入量累积器。
 ///
-/// 轨迹球位移精度远高于滚轮齿，按像素累积、攒够一齿注入一次；
-/// 小数部分保留，慢滚也能在若干次移动后凑出一齿。
+/// 轨迹球位移按像素累积，攒够「一齿」（= 像素/行 × 系统行每齿）才注入
+/// 一次整齿 delta（120 的倍数）——与真实滚轮完全一致：每步滚动精确等于
+/// 系统「每齿行数」。不足一齿的像素留在累积器里，慢滚也能凑出整齿。
 #[derive(Debug, Default, Clone)]
 pub struct WheelAccum {
     /// 已累积、尚未换算的像素（向上滚动为正，与滚轮方向一致）。
@@ -170,14 +176,19 @@ pub struct WheelAccum {
 
 impl WheelAccum {
     /// 喂入一段位移。`dy_px` 为纵向位移（向下为正；Raw Input 相对位移
-    /// 与屏幕坐标同向，灵敏度滑块以像素/齿标定，量级一致），
+    /// 与屏幕坐标同向，灵敏度以像素/行标定，量级一致），
+    /// `lines_per_notch` 为系统「每齿行数」。
     /// 返回应注入的滚轮量（120 的整数倍，方向：上滚为正）。
-    pub fn feed(&mut self, dy_px: f32, px_per_notch: f32) -> i32 {
-        if !(px_per_notch > 0.0) {
+    pub fn feed(&mut self, dy_px: f32, px_per_line: f32, lines_per_notch: f32) -> i32 {
+        if !(px_per_line > 0.0) || !(lines_per_notch > 0.0) {
             return 0;
         }
         // 屏幕坐标向下为正；滚轮向上为正 → 取反
         self.accum_px += -dy_px;
+        // 一齿 = 像素/行 × 行每齿；只发整齿 delta，保证每步滚动
+        // 精确等于系统「每齿行数」（亚齿 delta 依赖应用自行累积，
+        // 各应用实现不一，对不齐系统行/齿）
+        let px_per_notch = px_per_line * lines_per_notch;
         let notches = (self.accum_px / px_per_notch).trunc();
         if notches == 0.0 {
             return 0;
@@ -211,8 +222,8 @@ pub struct ScrollEngine {
     pub trigger: TriggerBtn,
     /// 当前生效规则的键盘开关键（单键）。
     pub kb_trigger: Option<KbTrigger>,
-    /// 当前生效规则的灵敏度（像素/齿）。
-    pub px_per_notch: u32,
+    /// 当前生效规则的灵敏度（像素/行）。
+    pub px_per_line: u32,
 }
 
 impl Default for ScrollEngine {
@@ -225,7 +236,7 @@ impl Default for ScrollEngine {
             accum: WheelAccum::default(),
             trigger: TriggerBtn::X1,
             kb_trigger: None,
-            px_per_notch: SCROLL_PX_DEFAULT,
+            px_per_line: SCROLL_PX_DEFAULT,
         }
     }
 }
@@ -274,48 +285,58 @@ mod tests {
     }
 
     #[test]
-    fn accumulates_subpixel_and_emits_notches() {
+    fn accumulates_subnotch_and_emits_whole_notches() {
         let mut a = WheelAccum::default();
-        // 40 像素/齿：每次上滚 15 像素，前两次都不够一齿
-        assert_eq!(a.feed(-15.0, 40.0), 0);
-        assert_eq!(a.feed(-15.0, 40.0), 0);
-        // 第三次累计 45 像素 → 一齿，剩 5 像素小数
-        assert_eq!(a.feed(-15.0, 40.0), 120);
-        // 再两次累计 20、35，都不够一齿
-        assert_eq!(a.feed(-15.0, 40.0), 0);
-        assert_eq!(a.feed(-15.0, 40.0), 0);
+        // 10 像素/行、系统 4 行/齿 → 一齿 40 像素；只发整齿 delta
+        assert_eq!(a.feed(-15.0, 10.0, 4.0), 0);
+        assert_eq!(a.feed(-15.0, 10.0, 4.0), 0);
+        // 第三次累计 45 像素 → 一齿，剩 5 像素
+        assert_eq!(a.feed(-15.0, 10.0, 4.0), 120);
+        assert_eq!(a.feed(-15.0, 10.0, 4.0), 0);
+        assert_eq!(a.feed(-15.0, 10.0, 4.0), 0);
         // 50 像素 → 一齿，剩 10
-        assert_eq!(a.feed(-15.0, 40.0), 120);
+        assert_eq!(a.feed(-15.0, 10.0, 4.0), 120);
     }
 
     #[test]
     fn direction_down_is_negative() {
         let mut a = WheelAccum::default();
-        // 向下移动 80 像素 → 2 齿向下滚
-        assert_eq!(a.feed(80.0, 40.0), -240);
+        // 80 像素、每齿 40 像素（10 像素/行 × 4 行）→ 2 齿向下滚
+        assert_eq!(a.feed(80.0, 10.0, 4.0), -240);
+    }
+
+    #[test]
+    fn lines_per_notch_scales_pixels_per_step() {
+        // 同一灵敏度下，行/齿越大每步需要的像素越多、每步滚动的行数也越多
+        let mut a = WheelAccum::default();
+        assert_eq!(a.feed(-15.0, 15.0, 1.0), 120); // 1 行/齿 → 15px 即一齿
+        let mut b = WheelAccum::default();
+        assert_eq!(b.feed(-15.0, 15.0, 3.0), 0); // 3 行/齿 → 需 45px
+        assert_eq!(b.feed(-45.0, 15.0, 3.0), 120); // 累计 60 → 一齿，剩 15
     }
 
     #[test]
     fn large_move_emits_multiple_notches() {
         let mut a = WheelAccum::default();
-        assert_eq!(a.feed(-190.0, 40.0), 480); // 4.75 齿 → 4 齿，剩 0.75
-        assert_eq!(a.feed(-10.0, 40.0), 120); // 剩量凑满
-        assert_eq!(a.feed(-0.0, 40.0), 0);
+        assert_eq!(a.feed(-190.0, 10.0, 4.0), 480); // 190/40 → 4 齿，剩 30 像素
+        assert_eq!(a.feed(-10.0, 10.0, 4.0), 120); // 剩量凑满一齿
+        assert_eq!(a.feed(-1.0, 10.0, 4.0), 0);
     }
 
     #[test]
     fn reset_clears_pending() {
         let mut a = WheelAccum::default();
-        a.feed(-30.0, 40.0);
+        a.feed(-10.0, 15.0, 3.0);
         a.reset();
-        assert_eq!(a.feed(-5.0, 40.0), 0);
+        assert_eq!(a.feed(-5.0, 15.0, 3.0), 0);
     }
 
     #[test]
-    fn invalid_px_per_notch_is_ignored() {
+    fn invalid_params_are_ignored() {
         let mut a = WheelAccum::default();
-        assert_eq!(a.feed(-100.0, 0.0), 0);
-        assert_eq!(a.feed(-100.0, -5.0), 0);
+        assert_eq!(a.feed(-100.0, 0.0, 3.0), 0);
+        assert_eq!(a.feed(-100.0, -5.0, 3.0), 0);
+        assert_eq!(a.feed(-100.0, 15.0, 0.0), 0);
     }
 
     #[test]
@@ -336,12 +357,24 @@ mod tests {
             enabled: true,
             trigger: TriggerBtn::X2,
             kb_trigger: Some(KbTrigger { vk: 0xA4 }),
-            px_per_notch: 30,
+            px_per_line: 30,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         assert!(s.contains("kb_trigger"));
         let back: ScrollCfg = serde_json::from_str(&s).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn scroll_cfg_legacy_px_per_notch_alias() {
+        // 旧配置字段 px_per_notch（像素/齿）按新语义直接读为像素/行；
+        // 缺失字段走容器默认
+        let legacy: ScrollCfg = serde_json::from_str(
+            r#"{"enabled":true,"trigger":"x2","px_per_notch":30}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.px_per_line, 30);
+        assert_eq!(legacy.kb_trigger, None);
     }
 
     #[test]
@@ -354,7 +387,7 @@ mod tests {
             accum: WheelAccum::default(),
             trigger: TriggerBtn::X1,
             kb_trigger: Some(KbTrigger { vk: 0xA4 }),
-            px_per_notch: SCROLL_PX_DEFAULT,
+            px_per_line: SCROLL_PX_DEFAULT,
         };
         // 鼠标按住 → 激活
         e.mouse_held = true;

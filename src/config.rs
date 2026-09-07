@@ -49,11 +49,11 @@ impl Rule {
             .map_or(crate::scroll::TriggerBtn::X1, |s| s.trigger)
     }
 
-    /// 滚轮模式灵敏度（规则未配置时取默认 40）。
+    /// 滚轮模式灵敏度（像素/行；规则未配置时取默认 15）。
     pub fn scroll_px(&self) -> u32 {
         self.scroll
             .as_ref()
-            .map_or(crate::scroll::SCROLL_PX_DEFAULT, |s| s.px_per_notch)
+            .map_or(crate::scroll::SCROLL_PX_DEFAULT, |s| s.px_per_line)
     }
 }
 

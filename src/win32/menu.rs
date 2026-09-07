@@ -1117,7 +1117,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                                 s.enabled,
                                 s.trigger,
                                 s.kb_trigger,
-                                s.px_per_notch,
+                                s.px_per_line,
                             )
                         },
                     );
@@ -1125,12 +1125,12 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                     .map_or("无".to_string(), |k| format!("键盘 {}", k.label()));
                 let scroll_line = if scroll_on {
                     format!(
-                        "滚轮模式: 开 · {} · {kb_label} · {scroll_px} 像素/齿",
+                        "滚轮模式: 开 · {} · {kb_label} · {scroll_px} 像素/行",
                         scroll_trigger.label()
                     )
                 } else {
                     format!(
-                        "滚轮模式: 关 · {} · {kb_label} · {scroll_px} 像素/齿",
+                        "滚轮模式: 关 · {} · {kb_label} · {scroll_px} 像素/行",
                         scroll_trigger.label()
                     )
                 };
@@ -1226,12 +1226,19 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                 s,
                 color,
             );
+            // 悬停展开单设备配置子菜单：右缘画展开指示
+            draw_sub_arrow(hdc, MENU_W - PAD, top + ROW_H / 2.0, s, color);
         }
 
         // ── 「其他设备」入口行 ──
         let other_top = other_row_top(n);
         let other_hovered = state.hover == Some(Hover::OtherDevices);
         let other_focused = model.kb_focus == Some(n);
+        let other_color = if other_hovered || other_focused {
+            pal.hl_text
+        } else {
+            pal.text
+        };
         draw_row_bg(
             hdc,
             other_top,
@@ -1250,12 +1257,9 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
             PAD + CHECK_W,
             other_top + ROW_H / 2.0,
             s,
-            if other_hovered || other_focused {
-                pal.hl_text
-            } else {
-                pal.text
-            },
+            other_color,
         );
+        draw_sub_arrow(hdc, MENU_W - PAD, other_top + ROW_H / 2.0, s, other_color);
 
         let auto_top = autostart_row_top(n);
         sep(hdc, auto_top - SEP_H, s, w, pal.sep);
@@ -1390,6 +1394,23 @@ pub(crate) fn draw_check(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
         let _ = MoveToEx(hdc, (cx - u).round() as i32, cy.round() as i32, None);
         let _ = LineTo(hdc, (cx - u / 3.0).round() as i32, (cy + u).round() as i32);
         let _ = LineTo(hdc, (cx + u).round() as i32, (cy - u).round() as i32);
+        SelectObject(hdc, old);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// 子菜单展开指示（右缘描边小箭头 ›）。`right_dip` 为箭头尖端的 x（DIP），
+/// 调用方传 `MENU_W - PAD` 或子菜单窗口的 `宽 - PAD`。
+pub(crate) fn draw_sub_arrow(hdc: HDC, right_dip: f32, cy_dip: f32, s: f32, color: COLORREF) {
+    unsafe {
+        let tip = right_dip * s;
+        let cy = cy_dip * s;
+        let u = 4.0 * s;
+        let pen = CreatePen(PS_SOLID, (1.5 * s).round().max(1.0) as i32, color);
+        let old = SelectObject(hdc, pen.into());
+        let _ = MoveToEx(hdc, (tip - u).round() as i32, (cy - u).round() as i32, None);
+        let _ = LineTo(hdc, tip.round() as i32, cy.round() as i32);
+        let _ = LineTo(hdc, (tip - u).round() as i32, (cy + u).round() as i32);
         SelectObject(hdc, old);
         let _ = DeleteObject(pen.into());
     }

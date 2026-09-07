@@ -184,7 +184,7 @@ fn open(
             None,
         )?
     };
-    // 滚轮模式灵敏度滑块（5–200 像素/齿）
+    // 滚轮模式灵敏度滑块（2–200 像素/行）
     let (xl, xt, xr, xb) = sub_scroll_sens_rect();
     let tb_scroll = unsafe {
         CreateWindowExW(
@@ -206,7 +206,7 @@ fn open(
         .model
         .sub_scroll
         .as_ref()
-        .map_or(SCROLL_PX_DEFAULT, |s| s.px_per_notch);
+        .map_or(SCROLL_PX_DEFAULT, |s| s.px_per_line);
     unsafe {
         SendMessageW(
             tb,
@@ -770,11 +770,11 @@ fn paint(ptr: *mut HostState, hwnd: HWND) {
 
                 // ── 滚动灵敏度标签 ──
                 let sens_top = sub_scroll_sens_label_top();
-                let sens_px = scroll.map_or(SCROLL_PX_DEFAULT, |s| s.px_per_notch);
+                let sens_px = scroll.map_or(SCROLL_PX_DEFAULT, |s| s.px_per_line);
                 let sens_color = if !scroll_enabled { pal.gray } else { pal.text };
                 draw_text(
                     mem,
-                    &format!("滚动灵敏度: {sens_px} 像素/齿"),
+                    &format!("滚动灵敏度: {sens_px} 像素/行"),
                     PAD,
                     sens_top + SUB_ROW_H / 2.0,
                     s,
