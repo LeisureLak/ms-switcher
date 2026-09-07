@@ -1,0 +1,18 @@
+{
+  "prompt": "vector flat modern app icon, white silhouette of a low-profile trackball mouse like the reference, large trackball ball in the center, four subtle corner buttons, flying through air with clean motion lines, solid colors, no pixelation, centered, isolated on dark navy to black gradient background, high contrast, modern UI icon style",
+  "references": [
+    "D:\\ai-projects\\mouse-sensitivity-switcher\\assets\\candidates\\ref\\slimblade_pro_ref.png"
+  ],
+  "reference_order": [
+    1
+  ],
+  "seed": 7009,
+  "width": 512,
+  "height": 512,
+  "lora_strength": 0.0,
+  "workflow": "D:\\ai-projects\\mouse-sensitivity-switcher\\assets\\candidates\\mss_slimblade_ref_10k_7009\\workflow_api.json",
+  "prompt_id": "deebf549-86a6-46d0-b586-66003b68d29c",
+  "outputs": [
+    "D:\\ai-projects\\mouse-sensitivity-switcher\\assets\\candidates\\mss_slimblade_ref_10k_7009\\mss_slimblade_ref_10k_7009_00001_.png"
+  ]
+}
