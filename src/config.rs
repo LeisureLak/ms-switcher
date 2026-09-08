@@ -33,14 +33,33 @@ fn default_speed() -> u32 {
     10
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub rules: Vec<Rule>,
-    /// 全局滚轮模式配置：无规则生效时生效；规则生效期间停用。
-    /// 沿用旧版顶层 `scroll` 字段名，旧配置中的该字段自动恢复生效。
+    #[serde(default = "default_speed")]
+    pub speed: u32,
+    #[serde(default = "default_wheel")]
+    pub wheel: u32,
+    /// 全局滚轮模式配置：选择全局配置时生效；设备特定配置期间停用。
+    /// 沿用旧版顶层 `scroll` 字段名，旧配置中的该字段继续兼容。
     #[serde(default)]
     pub scroll: Option<ScrollCfg>,
+}
+
+fn default_wheel() -> u32 {
+    3
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            rules: Vec::new(),
+            speed: default_speed(),
+            wheel: default_wheel(),
+            scroll: None,
+        }
+    }
 }
 
 impl Rule {
@@ -134,4 +153,17 @@ pub fn save(cfg: &Config) -> io::Result<()> {
     }
     let text = serde_json::to_string_pretty(cfg).unwrap();
     fs::write(&p, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_gets_windows_global_defaults() {
+        let cfg: Config = serde_json::from_str(r#"{"rules":[]}"#).unwrap();
+        assert_eq!(cfg.speed, crate::speed::SPEED_DEFAULT);
+        assert_eq!(cfg.wheel, crate::speed::WHEEL_DEFAULT);
+        assert_eq!(cfg.scroll, None);
+    }
 }

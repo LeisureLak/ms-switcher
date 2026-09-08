@@ -58,7 +58,7 @@ fn main() {
         return;
     }
 
-    // 滚轮模式（轨迹球特化）：按当前生效规则同步 WH_MOUSE_LL 常驻钩子
+    // 滚轮模式（轨迹球特化）：按当前所选全局/设备配置同步 WH_MOUSE_LL 常驻钩子
     win32::scroll_hook::sync(&mut state);
 
     // MSS_DEBUG_MENU=1：启动即弹出菜单（自动化冒烟测试用）

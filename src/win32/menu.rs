@@ -28,9 +28,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT,
-    CDIS_DISABLED, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NMCUSTOMDRAW,
-    NMHDR, NM_CUSTOMDRAW, SetWindowTheme, TBM_SETPOS, TBM_SETRANGE, TBCD_CHANNEL, TBCD_THUMB,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDIS_DISABLED, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
+    CDRF_SKIPDEFAULT, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NM_CUSTOMDRAW,
+    NMCUSTOMDRAW, NMHDR, SetWindowTheme, TBCD_CHANNEL, TBCD_THUMB, TBM_SETPOS, TBM_SETRANGE,
     TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASS, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -44,22 +44,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect,
     GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, HMENU,
     IDC_ARROW, LoadCursorW, PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WNDCLASSEXW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::menu_model::{
-    self, CHECK_W, EFF_INFO_H, EffectiveInfo, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H,
-    RULE_ICON_W, SEP_H, SLIDER_H, TITLE_H, TOP_PAD, autostart_row_top, device_row_top,
-    eff_row_top, exit_row_top, hover_at, menu_height, other_entry_text, other_row_top,
-    reset_btn_rect, scroll_kb_trigger_row_top, scroll_mode_row_top, scroll_sens_label_top,
-    scroll_sens_slider_rect, scroll_trigger_row_top, wheel_label_top, wheel_slider_top,
+    self, CHECK_W, EFF_INFO_H, Hover, INFO_ROW_H, MENU_W, MenuAction, PAD, ROW_H, RULE_ICON_W,
+    SEP_H, SLIDER_H, TITLE_H, autostart_row_top, device_row_top, eff_row_top, exit_row_top,
+    global_hint_top, global_row_top, global_slider_top, global_title_top, hover_at, menu_height,
+    other_entry_text, other_row_top, reset_btn_rect, scroll_kb_trigger_row_top,
+    scroll_mode_row_top, scroll_sens_label_top, scroll_sens_slider_rect, scroll_trigger_row_top,
+    wheel_label_top, wheel_slider_top,
 };
-use crate::scroll::{SCROLL_PX_DEFAULT, SCROLL_PX_MAX, SCROLL_PX_MIN, TriggerBtn};
+use crate::scroll::{SCROLL_PX_DEFAULT, SCROLL_PX_MAX, SCROLL_PX_MIN};
 
 use super::host::{HostState, WM_APP_CLOSE_MENU, sync_tip};
 
@@ -245,7 +245,11 @@ pub(crate) unsafe fn trackbar_custom_draw(pal: &Pal, nmc: &NMCUSTOMDRAW) -> LRES
             let _ = SelectObject(hdc, old_pen);
             let _ = DeleteObject(brush.into());
         } else if nmc.dwItemSpec == TBCD_THUMB as usize {
-            let thumb = if enabled && !disabled { pal.highlight } else { pal.gray };
+            let thumb = if enabled && !disabled {
+                pal.highlight
+            } else {
+                pal.gray
+            };
             let brush = CreateSolidBrush(thumb);
             let null_pen = GetStockObject(NULL_PEN);
             let old_pen = SelectObject(hdc, null_pen);
@@ -274,7 +278,10 @@ pub(crate) unsafe fn trackbar_notify(state: &HostState, lp: LPARAM) -> Option<LR
         state.sub_wheel_trackbar,
         state.sub_scroll_trackbar,
     ];
-    if tbs.iter().any(|h| h.map(|x| x == nm.hwndFrom).unwrap_or(false)) {
+    if tbs
+        .iter()
+        .any(|h| h.map(|x| x == nm.hwndFrom).unwrap_or(false))
+    {
         let nmc = &*(lp.0 as *const NMCUSTOMDRAW);
         Some(trackbar_custom_draw(&current_pal(state), nmc))
     } else {
@@ -390,11 +397,12 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
     // 数据刷新（与旧版 open_menu 一致）
     let mice = crate::devices::enumerate_mice();
     state.app.apply_diff(&mice);
-    state.model
+    state
+        .model
         .set_devs(menu_model::build_dev_rows(&mice, &state.app));
     state.model.refresh_effective(&state.app);
-    state.model.speed_val = crate::speed::get();
-    state.model.wheel_val = crate::speed::get_wheel();
+    state.model.speed_val = state.app.cfg.speed;
+    state.model.wheel_val = state.app.cfg.wheel;
     state.model.pending_speed = None;
     state.model.pending_wheel = None;
     state.model.sub_slider = None;
@@ -473,11 +481,9 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             WINDOW_EX_STYLE(0),
             TRACKBAR_CLASS,
             w!(""),
-            WS_CHILD
-                | WS_VISIBLE
-                | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
             px(hwnd, PAD),
-            px(hwnd, TOP_PAD + TITLE_H),
+            px(hwnd, global_slider_top()),
             px(hwnd, MENU_W - 2.0 * PAD),
             px(hwnd, SLIDER_H),
             Some(hwnd),
@@ -491,9 +497,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             WINDOW_EX_STYLE(0),
             TRACKBAR_CLASS,
             w!(""),
-            WS_CHILD
-                | WS_VISIBLE
-                | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
             px(hwnd, PAD),
             px(hwnd, wheel_slider_top()),
             px(hwnd, MENU_W - 2.0 * PAD),
@@ -546,9 +550,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             WINDOW_EX_STYLE(0),
             TRACKBAR_CLASS,
             w!(""),
-            WS_CHILD
-                | WS_VISIBLE
-                | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
             px(hwnd, xl),
             px(hwnd, xt),
             px(hwnd, xr - xl),
@@ -559,12 +561,7 @@ pub fn open(state: &mut HostState) -> Result<HWND, windows::core::Error> {
             None,
         )?
     };
-    let scroll_on = state
-        .app
-        .cfg
-        .scroll
-        .as_ref()
-        .map_or(false, |s| s.enabled);
+    let scroll_on = state.app.cfg.scroll.as_ref().map_or(false, |s| s.enabled);
     unsafe {
         SendMessageW(
             tb_px,
@@ -770,6 +767,7 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     h @ (Hover::Reset
                     | Hover::Autostart
                     | Hover::Exit
+                    | Hover::GlobalProfile
                     | Hover::Device(_)
                     | Hover::ScrollMode
                     | Hover::ScrollTrigger
@@ -971,10 +969,19 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             true
         }
         MenuAction::ResetDefault => {
-            // 指针与滚轮都恢复 Windows 默认；speed_set/wheel_set 负责模型、
-            // 滑块位置与 tooltip 的同步
-            speed_set(state, crate::speed::SPEED_DEFAULT);
-            wheel_set(state, crate::speed::WHEEL_DEFAULT);
+            state.app.reset_global();
+            state.model.speed_val = state.app.cfg.speed;
+            state.model.wheel_val = state.app.cfg.wheel;
+            state.model.global_px = SCROLL_PX_DEFAULT;
+            state.model.pending_speed = None;
+            state.model.pending_wheel = None;
+            state.model.pending_global_px = None;
+            let _ = crate::config::save(&state.app.cfg);
+            sync_global_controls(state);
+            state.model.refresh_effective(&state.app);
+            super::scroll_hook::sync(state);
+            sync_tip(state);
+            invalidate_state(state);
             true
         }
         MenuAction::ToggleAutostart => {
@@ -998,10 +1005,15 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                         .cfg
                         .rule_for(&v, &p)
                         .and_then(|r| r.scroll.clone());
-                    state
-                        .app
-                        .cfg
-                        .set_rule(&v, &p, cur, Some(wheel), scroll, Some(d.name.clone()), alias);
+                    state.app.cfg.set_rule(
+                        &v,
+                        &p,
+                        cur,
+                        Some(wheel),
+                        scroll,
+                        Some(d.name.clone()),
+                        alias,
+                    );
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
@@ -1013,10 +1025,15 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             if let Some(d) = state.model.devs.get(i) {
                 if let (Some(v), Some(p)) = (d.vid.clone(), d.pid.clone()) {
                     // 「设为规则」按钮：指针、滚轮、滚轮模式、别名都取子菜单本地值
-                    state
-                        .app
-                        .cfg
-                        .set_rule(&v, &p, sp, Some(wh), scroll, Some(d.name.clone()), alias);
+                    state.app.cfg.set_rule(
+                        &v,
+                        &p,
+                        sp,
+                        Some(wh),
+                        scroll,
+                        Some(d.name.clone()),
+                        alias,
+                    );
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
@@ -1040,24 +1057,25 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             super::scroll_hook::sync(state);
             false
         }
-        MenuAction::ActivateRule(idx) => {
+        MenuAction::ToggleGlobalProfile => {
+            state.app.activate_global();
+            state.model.refresh_effective(&state.app);
+            super::scroll_hook::sync(state);
+            false
+        }
+        MenuAction::ToggleRule(idx) => {
             if let Some(d) = state.model.devs.get(idx) {
-                state.app.activate_rule(&d.instance_id);
+                state.app.toggle_rule(&d.instance_id);
                 state.model.refresh_effective(&state.app);
                 super::scroll_hook::sync(state);
             }
             false
         }
         MenuAction::ToggleGlobalScroll => {
-            // 全局滚轮模式勾选：就地写入配置（视为手动调节全局配置 → 规则失效）
+            // 全局滚轮模式勾选：只写全局配置，不切换当前设备配置
             state.app.update_global_scroll(|c| c.enabled = !c.enabled);
             let _ = crate::config::save(&state.app.cfg);
-            let on = state
-                .app
-                .cfg
-                .scroll
-                .as_ref()
-                .map_or(false, |s| s.enabled);
+            let on = state.app.cfg.scroll.as_ref().map_or(false, |s| s.enabled);
             if let Some(tb) = state.scroll_px_trackbar {
                 unsafe {
                     let _ = EnableWindow(tb, on);
@@ -1072,12 +1090,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
         MenuAction::CaptureGlobalTrigger | MenuAction::CaptureGlobalKbTrigger => {
             // 全局触发键录入：仅滚轮模式启用时；录入结果经
             // WM_APP_SCROLL_CHANGED / WM_APP_KB_SCROLL_CHANGED 写回 cfg.scroll
-            let on = state
-                .app
-                .cfg
-                .scroll
-                .as_ref()
-                .map_or(false, |s| s.enabled);
+            let on = state.app.cfg.scroll.as_ref().map_or(false, |s| s.enabled);
             if on && !state.model.capturing {
                 state.capture_global = true;
                 if matches!(action, MenuAction::CaptureGlobalTrigger) {
@@ -1159,7 +1172,7 @@ fn handle_slider_event(state: &mut HostState, notify: u32, pos: i32, wheel: bool
 }
 
 /// 全局滚轮模式灵敏度滑块事件：语义同 [`handle_slider_event`]
-/// （拖动只预览，松手才应用）。应用 = 写入 `cfg.scroll` 并使当前生效规则失效。
+/// （拖动只预览，松手才应用）。应用只写入 `cfg.scroll`。
 fn handle_global_px_event(state: &mut HostState, notify: u32, pos: i32) {
     match notify {
         TB_THUMBTRACK => {
@@ -1185,7 +1198,7 @@ fn handle_global_px_event(state: &mut HostState, notify: u32, pos: i32) {
     }
 }
 
-/// 全局滚动灵敏度落盘：写 `cfg.scroll.px_per_line` 并使当前生效规则失效。
+/// 全局滚动灵敏度落盘：写 `cfg.scroll.px_per_line`，不切换当前配置。
 fn global_px_apply(state: &mut HostState, v: u32) {
     state.model.global_px = v;
     state.app.update_global_scroll(|c| c.px_per_line = v);
@@ -1196,12 +1209,13 @@ fn global_px_apply(state: &mut HostState, v: u32) {
     invalidate_state(state);
 }
 
-/// 指针速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
-/// 手动调速会使当前生效规则失效（连带关闭其滚轮模式）。
+/// 全局指针速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
+/// 设备配置生效时只编辑全局值，不改当前系统速度。
 fn speed_set(state: &mut HostState, v: u32) {
-    state.app.set_speed_manual(v);
-    state.model.speed_val = v.clamp(1, 20);
+    state.app.set_global_speed(v);
+    state.model.speed_val = state.app.cfg.speed;
     state.model.pending_speed = None;
+    let _ = crate::config::save(&state.app.cfg);
     state.model.refresh_effective(&state.app);
     if let Some(tb) = state.trackbar {
         unsafe {
@@ -1218,12 +1232,13 @@ fn speed_set(state: &mut HostState, v: u32) {
     invalidate_state(state);
 }
 
-/// 滚轮速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
-/// 手动调速会使当前生效规则失效（连带关闭其滚轮模式）。
+/// 全局滚轮速度落盘 + 模型 + 滑块 + tooltip 的单一入口。
+/// 设备配置生效时只编辑全局值，不改当前系统速度。
 fn wheel_set(state: &mut HostState, v: u32) {
-    state.app.set_wheel_manual(v);
-    state.model.wheel_val = v.clamp(1, 100);
+    state.app.set_global_wheel(v);
+    state.model.wheel_val = state.app.cfg.wheel;
     state.model.pending_wheel = None;
+    let _ = crate::config::save(&state.app.cfg);
     state.model.refresh_effective(&state.app);
     if let Some(tb) = state.wheel_trackbar {
         unsafe {
@@ -1241,6 +1256,39 @@ fn wheel_set(state: &mut HostState, v: u32) {
 }
 
 /// 菜单键盘 ←/→ 的离散调速。
+fn sync_global_controls(state: &HostState) {
+    unsafe {
+        if let Some(tb) = state.trackbar {
+            SendMessageW(
+                tb,
+                TBM_SETPOS,
+                Some(WPARAM(1)),
+                Some(LPARAM(state.model.speed_val as isize)),
+            );
+        }
+        if let Some(tb) = state.wheel_trackbar {
+            SendMessageW(
+                tb,
+                TBM_SETPOS,
+                Some(WPARAM(1)),
+                Some(LPARAM(state.model.wheel_val as isize)),
+            );
+        }
+        if let Some(tb) = state.scroll_px_trackbar {
+            SendMessageW(
+                tb,
+                TBM_SETPOS,
+                Some(WPARAM(1)),
+                Some(LPARAM(state.model.global_px as isize)),
+            );
+            let _ = EnableWindow(
+                tb,
+                state.app.cfg.scroll.as_ref().map_or(false, |s| s.enabled),
+            );
+        }
+    }
+}
+
 fn nudge_speed(state: &mut HostState, delta: i32) {
     let v = (state.model.speed_val as i32 + delta).clamp(1, 20) as u32;
     if v != state.model.speed_val {
@@ -1305,15 +1353,108 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         let old_font = SelectObject(hdc, ui_font(state).into());
         SetBkMode(hdc, TRANSPARENT);
 
-        // ── 标题行：指针速度: N + 恢复默认按钮 ──
-        // 拖动中显示预览值（灰色提示尚未应用），松手才真正改系统速度
-        let title_text = format!("指针速度: {}", model.display_speed());
+        // ── 当前生效配置 ──
+        let eff_y = eff_row_top();
+        let scroll_line = |scroll: Option<&crate::scroll::ScrollCfg>| {
+            let Some(scroll) = scroll else {
+                return "滚轮模式: 关 · 快捷键: 无".to_string();
+            };
+            if scroll.enabled {
+                let kb = scroll.kb_trigger.map_or("无".to_string(), |k| k.label());
+                format!(
+                    "滚轮模式: 开 · {} · 键盘 {} · {} 像素/行",
+                    scroll.trigger.label(),
+                    kb,
+                    scroll.px_per_line
+                )
+            } else {
+                "滚轮模式: 关".to_string()
+            }
+        };
+        match &model.effective {
+            Some(info) => {
+                let wheel = info.wheel.map_or("保持".to_string(), |v| v.to_string());
+                draw_text(
+                    hdc,
+                    "当前生效: 设备特定配置",
+                    PAD,
+                    eff_y + INFO_ROW_H / 2.0,
+                    s,
+                    pal.gray,
+                );
+                draw_text(
+                    hdc,
+                    &format!("{} · 指针: {} · 滚轮: {wheel}", info.name, info.speed),
+                    PAD,
+                    eff_y + INFO_ROW_H * 1.5,
+                    s,
+                    pal.gray,
+                );
+                draw_text(
+                    hdc,
+                    &scroll_line(info.scroll.as_ref()),
+                    PAD,
+                    eff_y + INFO_ROW_H * 2.5,
+                    s,
+                    pal.gray,
+                );
+            }
+            None => {
+                draw_text(
+                    hdc,
+                    "当前生效: 全局配置",
+                    PAD,
+                    eff_y + INFO_ROW_H / 2.0,
+                    s,
+                    pal.gray,
+                );
+                draw_text(
+                    hdc,
+                    &format!(
+                        "指针: {} · 滚轮: {}",
+                        state.app.cfg.speed, state.app.cfg.wheel
+                    ),
+                    PAD,
+                    eff_y + INFO_ROW_H * 1.5,
+                    s,
+                    pal.gray,
+                );
+                draw_text(
+                    hdc,
+                    &scroll_line(state.app.cfg.scroll.as_ref()),
+                    PAD,
+                    eff_y + INFO_ROW_H * 2.5,
+                    s,
+                    pal.gray,
+                );
+            }
+        }
+        sep(hdc, eff_y + EFF_INFO_H, s, w, pal.sep);
+        draw_text(
+            hdc,
+            "全局配置设置",
+            PAD,
+            global_hint_top() + INFO_ROW_H / 2.0,
+            s,
+            pal.gray,
+        );
+
+        // ── 标题行：全局指针速度 + 恢复默认按钮 ──
+        // 拖动中显示预览值（灰色提示尚未应用），松手才写入全局配置
+        let title_text = format!("全局指针速度: {}", model.display_speed());
         let title_color = if model.pending_speed.is_some() {
             pal.gray
         } else {
             pal.text
         };
-        draw_text(hdc, &title_text, PAD, TITLE_H / 2.0, s, title_color);
+        draw_text(
+            hdc,
+            &title_text,
+            PAD,
+            global_title_top() + TITLE_H / 2.0,
+            s,
+            title_color,
+        );
 
         let (rl, rt, rr, rb) = reset_btn_rect();
         let hovered_reset = state.hover == Some(Hover::Reset);
@@ -1348,7 +1489,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         draw_text_center(hdc, "恢复默认", rl, rt, rr, rb, s, btn_color);
 
         // ── 滚轮标签行 + 滚轮滑块（真控件）──
-        let wheel_text = format!("滚轮: {}", model.display_wheel());
+        let wheel_text = format!("全局滚轮: {}", model.display_wheel());
         let wheel_color = if model.pending_wheel.is_some() {
             pal.gray
         } else {
@@ -1364,7 +1505,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         );
         // ── 全局滚轮模式区：滚轮模式勾选 / 触发键 / 键盘触发键 / 灵敏度标签 ──
         // （灵敏度滑块是真实 Trackbar 子控件，见 open()；布局与子菜单滚轮模式区一致，
-        //   就地操作、即时写入 cfg.scroll 并使当前生效规则失效）
+        //   就地操作、即时写入 cfg.scroll，不切换当前配置）
         let scroll = state.app.cfg.scroll.as_ref();
         let scroll_on = scroll.map_or(false, |s| s.enabled);
         let kb_capturing = super::scroll_hook::is_kb_capturing();
@@ -1415,10 +1556,18 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         let trig_text = if capturing_global && !kb_capturing {
             "触发键: 按下任意鼠标键…(Esc取消)".to_string()
         } else {
-            let t = scroll.map_or(TriggerBtn::X1, |s| s.trigger);
-            format!("触发键: {}", t.label())
+            scroll.map_or("触发键: 无".to_string(), |s| {
+                format!("触发键: {}", s.trigger.label())
+            })
         };
-        draw_text(hdc, &trig_text, PAD + CHECK_W, trig_top + ROW_H / 2.0, s, trig_color);
+        draw_text(
+            hdc,
+            &trig_text,
+            PAD + CHECK_W,
+            trig_top + ROW_H / 2.0,
+            s,
+            trig_color,
+        );
 
         // 键盘触发键行
         let kb_top = scroll_kb_trigger_row_top();
@@ -1431,7 +1580,14 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
                 None => "键盘触发: 无".to_string(),
             }
         };
-        draw_text(hdc, &kb_text, PAD + CHECK_W, kb_top + ROW_H / 2.0, s, kb_color);
+        draw_text(
+            hdc,
+            &kb_text,
+            PAD + CHECK_W,
+            kb_top + ROW_H / 2.0,
+            s,
+            kb_color,
+        );
 
         // 滚动灵敏度标签（拖动中灰色预览，与标题行一致）
         let sens_top = scroll_sens_label_top();
@@ -1448,103 +1604,53 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
             s,
             sens_color,
         );
-        sep(hdc, eff_row_top() - SEP_H, s, w, pal.sep);
+        sep(hdc, global_row_top() - SEP_H, s, w, pal.sep);
 
-        // ── 生效规则：三行（规则名 / 两个速度 / 滚轮模式）──
-        let eff_y = eff_row_top();
-        match &model.effective {
-            Some(info) => {
-                let EffectiveInfo {
-                    name,
-                    speed,
-                    wheel,
-                    scroll,
-                } = info;
-                let wheel_str = wheel.map_or("保持".to_string(), |w| w.to_string());
-                let (scroll_on, scroll_trigger, scroll_kb, scroll_px) = scroll
-                    .as_ref()
-                    .map_or(
-                        (false, TriggerBtn::X1, None, SCROLL_PX_DEFAULT),
-                        |s| {
-                            (
-                                s.enabled,
-                                s.trigger,
-                                s.kb_trigger,
-                                s.px_per_line,
-                            )
-                        },
-                    );
-                let kb_label = scroll_kb
-                    .map_or("无".to_string(), |k| format!("键盘 {}", k.label()));
-                let scroll_line = if scroll_on {
-                    format!(
-                        "滚轮模式: 开 · {} · {kb_label} · {scroll_px} 像素/行",
-                        scroll_trigger.label()
-                    )
-                } else {
-                    format!(
-                        "滚轮模式: 关 · {} · {kb_label} · {scroll_px} 像素/行",
-                        scroll_trigger.label()
-                    )
-                };
-                draw_text(
-                    hdc,
-                    &format!("生效规则: {name}"),
-                    PAD,
-                    eff_y + INFO_ROW_H / 2.0,
-                    s,
-                    pal.gray,
-                );
-                draw_text(
-                    hdc,
-                    &format!("指针: {speed} · 滚轮: {wheel_str}"),
-                    PAD,
-                    eff_y + INFO_ROW_H * 1.5,
-                    s,
-                    pal.gray,
-                );
-                draw_text(
-                    hdc,
-                    &scroll_line,
-                    PAD,
-                    eff_y + INFO_ROW_H * 2.5,
-                    s,
-                    pal.gray,
-                );
+        // ── 配置切换区 ──
+        {
+            let top = global_row_top();
+            let hovered = state.hover == Some(Hover::GlobalProfile);
+            let pressed = state.pressed == Some(Hover::GlobalProfile);
+            let focused = model.kb_focus == Some(0);
+            let color = if hovered || pressed {
+                pal.hl_text
+            } else {
+                pal.text
+            };
+            draw_row_bg(
+                hdc,
+                top,
+                ROW_H,
+                s,
+                w,
+                hovered,
+                pressed,
+                focused,
+                pal.highlight,
+                pal.row_pressed,
+            );
+            if state.app.global_active() {
+                draw_check(hdc, top + ROW_H / 2.0, s, color);
             }
-            None => {
-                draw_text(
-                    hdc,
-                    "生效规则: 无",
-                    PAD,
-                    eff_y + EFF_INFO_H / 2.0,
-                    s,
-                    pal.gray,
-                );
-            }
+            draw_text(hdc, "全局配置", PAD + CHECK_W, top + ROW_H / 2.0, s, color);
         }
-
-        sep(hdc, eff_y + EFF_INFO_H, s, w, pal.sep);
 
         // ── 设备行（只显示有规则设备）──
         if n == 0 {
             let py = device_row_top(0) + INFO_ROW_H / 2.0;
-            draw_text(
-                hdc,
-                "无生效规则设备",
-                PAD,
-                py,
-                s,
-                pal.gray,
-            );
+            draw_text(hdc, "无设备特定配置", PAD, py, s, pal.gray);
         }
         for (local, &global) in model.ruled_devs.iter().enumerate() {
             let d = &model.devs[global];
             let top = device_row_top(local);
             let hovered = state.hover == Some(Hover::Device(local));
             let pressed = state.pressed == Some(Hover::Device(local));
-            let focused = model.kb_focus == Some(local);
-            let color = if hovered || pressed { pal.hl_text } else { pal.text };
+            let focused = model.kb_focus == Some(local + 1);
+            let color = if hovered || pressed {
+                pal.hl_text
+            } else {
+                pal.text
+            };
             draw_row_bg(
                 hdc,
                 top,
@@ -1587,7 +1693,7 @@ fn draw_menu(state: &HostState, hdc: HDC, s: f32, w: i32, h: i32) {
         // ── 「其他设备」入口行 ──
         let other_top = other_row_top(n);
         let other_hovered = state.hover == Some(Hover::OtherDevices);
-        let other_focused = model.kb_focus == Some(n);
+        let other_focused = model.kb_focus == Some(n + 1);
         let other_color = if other_hovered || other_focused {
             pal.hl_text
         } else {
@@ -1830,12 +1936,7 @@ fn draw_scroll(hdc: HDC, cy_dip: f32, s: f32, color: COLORREF) {
         );
         SelectObject(hdc, old_brush);
         // 滚轮：上半部一小段竖线
-        let _ = MoveToEx(
-            hdc,
-            cx.round() as i32,
-            (cy - 3.5 * s).round() as i32,
-            None,
-        );
+        let _ = MoveToEx(hdc, cx.round() as i32, (cy - 3.5 * s).round() as i32, None);
         let _ = LineTo(hdc, cx.round() as i32, (cy - 1.0 * s).round() as i32);
         SelectObject(hdc, old_pen);
         let _ = DeleteObject(pen.into());

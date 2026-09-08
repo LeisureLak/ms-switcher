@@ -23,23 +23,24 @@ use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{DeleteObject, InvalidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::TBM_SETPOS;
 use windows::Win32::UI::Shell::{NIM_SETFOCUS, NOTIFYICONDATAW, Shell_NotifyIconW};
 use windows::Win32::UI::WindowsAndMessaging as win;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GetMessageW, GetWindowLongPtrW, GetWindowRect, HHOOK, IDC_ARROW, KillTimer,
     LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
-    WM_LBUTTONDOWN, WM_NCCREATE, WM_RBUTTONDOWN, WNDCLASSEXW,
+    RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_LBUTTONDOWN,
+    WM_NCCREATE, WM_RBUTTONDOWN, WNDCLASSEXW,
 };
 use windows::core::w;
 
 use super::device_notify::MouseDevNotify;
 use super::focus;
 use super::menu;
-use super::scroll_hook::{self, WM_APP_KB_SCROLL_CHANGED, WM_APP_SCROLL_CHANGED, WM_APP_SCROLL_INJECT};
+use super::scroll_hook::{
+    self, WM_APP_KB_SCROLL_CHANGED, WM_APP_SCROLL_CHANGED, WM_APP_SCROLL_INJECT,
+};
 use super::submenu;
 use super::tray::{self, Tray};
 use crate::menu_model::{self, Hover, MenuModel};
@@ -171,8 +172,7 @@ impl HostState {
             scroll: crate::scroll::ScrollEngine::default(),
             theme_dark: menu::system_dark(),
             hc: menu::high_contrast(),
-            debug: std::env::var("MSS_DEBUG").is_ok()
-                || std::env::var("MSS_DEBUG_MENU").is_ok(),
+            debug: std::env::var("MSS_DEBUG").is_ok() || std::env::var("MSS_DEBUG_MENU").is_ok(),
         })
     }
 
@@ -443,34 +443,11 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let cur = speed::get();
             let cur_wheel = speed::get_wheel();
             // 与本程序最后应用值不同 → 外部修改（如 Windows 设置），
-            // 当前生效规则失效（连带关闭其滚轮模式）；自身写入的广播回环被过滤
+            // 切回全局配置口径但不覆盖持久化全局值；自身写入的广播回环被过滤
             if state.app.on_speed_observed(cur, cur_wheel) {
                 state.model.refresh_effective(&state.app);
                 scroll_hook::sync(state);
                 invalidate_menus(state);
-            }
-            let speed_changed = cur != state.model.speed_val;
-            let wheel_changed = cur_wheel != state.model.wheel_val;
-            if speed_changed {
-                state.model.speed_val = cur;
-                if let Some(tb) = state.trackbar {
-                    SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur as isize)));
-                }
-                invalidate_menus(state);
-            }
-            if wheel_changed {
-                state.model.wheel_val = cur_wheel;
-                if let Some(tb) = state.wheel_trackbar {
-                    SendMessageW(
-                        tb,
-                        TBM_SETPOS,
-                        Some(WPARAM(1)),
-                        Some(LPARAM(cur_wheel as isize)),
-                    );
-                }
-                invalidate_menus(state);
-            }
-            if speed_changed || wheel_changed {
                 sync_tip(state);
             }
 
@@ -481,7 +458,10 @@ unsafe extern "system" fn host_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 state.theme_dark = new_dark;
                 state.hc = new_hc;
                 let pal = menu::current_pal(state);
-                for h in [state.menu, state.sub, state.other_sub].into_iter().flatten() {
+                for h in [state.menu, state.sub, state.other_sub]
+                    .into_iter()
+                    .flatten()
+                {
                     menu::apply_dwm(h, &pal);
                 }
                 for tb in [
@@ -749,7 +729,10 @@ fn debounced_scan(state: &mut HostState) {
 
 /// 菜单打开中则整体重绘。主菜单、其他设备列表子菜单与单设备配置子菜单都标脏。
 fn invalidate_menus(state: &HostState) {
-    for h in [state.menu, state.other_sub, state.sub].into_iter().flatten() {
+    for h in [state.menu, state.other_sub, state.sub]
+        .into_iter()
+        .flatten()
+    {
         unsafe {
             let _ = InvalidateRect(Some(h), None, false);
         }
