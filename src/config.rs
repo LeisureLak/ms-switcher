@@ -45,6 +45,10 @@ pub struct Config {
     /// 沿用旧版顶层 `scroll` 字段名，旧配置中的该字段继续兼容。
     #[serde(default)]
     pub scroll: Option<ScrollCfg>,
+    /// 上次实际生效的配置；None = 全局配置，Some(实例ID) = 特定设备规则。
+    /// 用于启动时自动恢复到上次使用的配置。
+    #[serde(default)]
+    pub last_active: Option<String>,
 }
 
 fn default_wheel() -> u32 {
@@ -58,6 +62,7 @@ impl Default for Config {
             speed: default_speed(),
             wheel: default_wheel(),
             scroll: None,
+            last_active: None,
         }
     }
 }

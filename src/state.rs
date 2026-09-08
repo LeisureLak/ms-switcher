@@ -22,7 +22,8 @@ pub struct AppState {
 
 impl AppState {
     /// 读配置、枚举已插入设备并记录到 active 列表。
-    /// 不再在启动时自动应用任何规则，切换完全由用户手动触发。
+    /// 启动时若 `cfg.last_active` 指向的设备仍连接且有规则，则自动应用；
+    /// 否则应用持久化的全局配置。
     pub fn new(mut cfg: Config) -> AppState {
         cfg.speed = cfg.speed.clamp(1, 20);
         cfg.wheel = cfg.wheel.clamp(speed::WHEEL_MIN, speed::WHEEL_MAX);
@@ -39,7 +40,23 @@ impl AppState {
         for dev in devices::enumerate_mice() {
             s.on_device_inserted(&dev);
         }
+        // 启动时自动恢复上次生效的配置
+        s.try_activate_last_active();
         s
+    }
+
+    /// 尝试恢复 `cfg.last_active` 指向的设备规则。
+    /// 仅当该设备仍连接且命中规则时才会切换；否则保持全局配置。
+    fn try_activate_last_active(&mut self) {
+        let id = self.cfg.last_active.clone();
+        if let Some(id) = id.as_deref() {
+            if let Some(pos) = self.active.iter().position(|(i, _)| i == id) {
+                let dev = self.active[pos].1.clone();
+                if self.rule_for(&dev).is_some() {
+                    self.activate_rule(id);
+                }
+            }
+        }
     }
 
     fn rule_for(&self, dev: &Device) -> Option<&Rule> {
@@ -342,6 +359,7 @@ mod tests {
             speed: original,
             wheel: original_wheel,
             scroll: None,
+            last_active: None,
         };
         let st = AppState {
             cfg,
@@ -604,5 +622,48 @@ mod tests {
         assert_eq!(st.cfg.speed, speed::SPEED_DEFAULT);
         assert_eq!(st.cfg.wheel, speed::WHEEL_DEFAULT);
         assert_eq!(st.cfg.scroll, None);
+    }
+
+    #[test]
+    fn startup_restores_last_active_device() {
+        let (mut st, original, _original_wheel, _g) = state_with_rule();
+        st.cfg.last_active = Some("ID-A".into());
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+
+        st.try_activate_last_active();
+        assert_eq!(speed::get(), 4);
+        assert!(!st.global_active());
+        assert_eq!(
+            st.effective_rule().map(|(d, _)| d.instance_id.as_str()),
+            Some("ID-A")
+        );
+
+        // 切回全局时基线应为原始全局速度
+        st.activate_global();
+        assert_eq!(speed::get(), original);
+    }
+
+    #[test]
+    fn startup_skips_last_active_without_rule() {
+        let (mut st, original, _original_wheel, _g) = state_with_rule();
+        st.cfg.last_active = Some("ID-B".into());
+        st.apply_diff(&[dev("ID-B", "1234", "5678")]);
+
+        st.try_activate_last_active();
+        assert!(st.global_active());
+        assert_eq!(speed::get(), original);
+        assert!(st.effective_rule().is_none());
+    }
+
+    #[test]
+    fn startup_ignores_disconnected_last_active() {
+        let (mut st, original, _original_wheel, _g) = state_with_rule();
+        st.cfg.last_active = Some("ID-X".into());
+        st.apply_diff(&[dev("ID-A", "056E", "01C5")]);
+
+        st.try_activate_last_active();
+        assert!(st.global_active());
+        assert_eq!(speed::get(), original);
+        assert!(st.effective_rule().is_none());
     }
 }

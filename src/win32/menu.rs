@@ -961,6 +961,15 @@ pub(crate) fn dispatch(ptr: *mut HostState, actions: Vec<MenuAction>) {
     }
 }
 
+/// 将当前生效的配置记录到 `cfg.last_active` 并落盘。
+fn persist_last_active(state: &mut HostState) {
+    state.app.cfg.last_active = state
+        .app
+        .effective_rule()
+        .map(|(d, _)| d.instance_id.clone());
+    let _ = crate::config::save(&state.app.cfg);
+}
+
 fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
     let state = unsafe { &mut *ptr };
     match action {
@@ -980,6 +989,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
             sync_global_controls(state);
             state.model.refresh_effective(&state.app);
             super::scroll_hook::sync(state);
+            persist_last_active(state);
             sync_tip(state);
             invalidate_state(state);
             true
@@ -1017,6 +1027,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
+                    persist_last_active(state);
                 }
             }
             false
@@ -1037,6 +1048,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
+                    persist_last_active(state);
                 }
             }
             false
@@ -1048,6 +1060,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                     let _ = crate::config::save(&state.app.cfg);
                     state.app.reapply();
                     super::scroll_hook::sync(state);
+                    persist_last_active(state);
                 }
             }
             false
@@ -1055,12 +1068,14 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
         MenuAction::Reapply(_) => {
             state.app.reapply();
             super::scroll_hook::sync(state);
+            persist_last_active(state);
             false
         }
         MenuAction::ToggleGlobalProfile => {
             state.app.activate_global();
             state.model.refresh_effective(&state.app);
             super::scroll_hook::sync(state);
+            persist_last_active(state);
             false
         }
         MenuAction::ToggleRule(idx) => {
@@ -1068,6 +1083,7 @@ fn run_action(ptr: *mut HostState, action: MenuAction) -> bool {
                 state.app.toggle_rule(&d.instance_id);
                 state.model.refresh_effective(&state.app);
                 super::scroll_hook::sync(state);
+                persist_last_active(state);
             }
             false
         }
