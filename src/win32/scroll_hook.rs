@@ -14,6 +14,12 @@
 //!   进入滚轮模式；按住期间一旦又按下其它任意键（如 Alt+Tab 的 Tab），
 //!   立即取消滚轮模式，避免影响系统/应用组合快捷键。开关键松开也取消。
 //!   键盘钩子只观察不灭活键盘事件。
+//! - **物理状态自愈**：`mouse_held`/`kb_held`/`KEYS_DOWN` 由钩子事件维护，
+//!   但 USB 挂起重置、安全桌面（UAC/锁屏）等场景会丢 down/up 事件，
+//!   事件驱动的 held 状态会永久残留——滚轮模式卡死吞掉所有移动，或
+//!   残留的「其它键」位让触发键永远无法激活。每次判定前以
+//!   `GetAsyncKeyState` 物理状态对账（`phys_down`/`reconcile_keys`），
+//!   下一个输入事件到达即自愈（踩坑 四-25）。
 //! - **触发键录入**：菜单点「触发键」后进入鼠标触发键录入态，下一个鼠标键
 //!   成为触发键（该次按下被吞掉）；点「键盘触发键」后进入键盘录入态，按下单键
 //!   即记录。菜单内按**左/右键**视为取消鼠标录入。录入结束经
@@ -36,8 +42,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, AtomicU32
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_SCANCODE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -411,9 +417,56 @@ fn set_key_up(vk: u32) {
     KEYS_DOWN[idx].fetch_and(!bit, Ordering::Relaxed);
 }
 
-fn is_key_down(vk: u32) -> bool {
-    let (idx, bit) = key_index(vk);
-    KEYS_DOWN[idx].load(Ordering::Acquire) & bit != 0
+/// 虚拟键当前是否**物理**按下（GetAsyncKeyState 高位 = down）。
+///
+/// held 状态不能只靠投递的 down/up 事件维护：USB 挂起重置、安全桌面
+/// （UAC/锁屏）期间钩子收不到任何事件，期间松开的键会在位图/标志里
+/// 永久残留（踩坑 四-25）。物理状态反映的是「现在」，与事件是否送达
+/// 无关，且不受我们是否吞掉该事件影响。
+fn phys_down(vk: u32) -> bool {
+    vk != 0 && unsafe { GetAsyncKeyState(vk as i32) < 0 }
+}
+
+/// 归一化虚拟键当前是否物理按下。归一化修饰键（Shift/Ctrl/Alt/Win）
+/// 需同时检查左右两个具体键码。
+fn canon_phys_down(canon: u32) -> bool {
+    let (a, b, c) = match canon {
+        0x10 => (0xA0, 0xA1, 0x10),
+        0x11 => (0xA2, 0xA3, 0x11),
+        0x12 => (0xA4, 0xA5, 0x12),
+        0x5B => (0x5B, 0x5C, 0x5B),
+        v => (v, v, v),
+    };
+    [a, b, c].into_iter().any(phys_down)
+}
+
+/// 鼠标触发键当前是否物理按下。
+fn trigger_btn_phys_down(t: TriggerBtn) -> bool {
+    let vk = match t {
+        TriggerBtn::Left => 0x01,
+        TriggerBtn::Right => 0x02,
+        TriggerBtn::Middle => 0x04,
+        TriggerBtn::X1 => 0x05,
+        TriggerBtn::X2 => 0x06,
+    };
+    phys_down(vk)
+}
+
+/// 用物理按键状态校位图：清掉「位图记录按下但物理已松开」的残留位。
+/// 残留位会让 `any_key_down_except` 永远以为有其它键按住（触发键永远
+/// 无法激活），残留的触发键位则会让滚轮模式卡死。
+fn reconcile_keys() {
+    for i in 0..4 {
+        let mut v = KEYS_DOWN[i].load(Ordering::Acquire);
+        while v != 0 {
+            let b = v.trailing_zeros();
+            let canon = ((i as u32) << 6) | b;
+            if !canon_phys_down(canon) {
+                KEYS_DOWN[i].fetch_and(!(1u64 << b), Ordering::Relaxed);
+            }
+            v &= v - 1;
+        }
+    }
 }
 
 fn any_key_down_except(trigger_vk: u32) -> bool {
@@ -434,8 +487,13 @@ fn any_key_down_except(trigger_vk: u32) -> bool {
 }
 
 /// 返回当前是否有任何非注入键被按住（用于判定「开关键单独按住」）。
+///
+/// 触发键按下与否以 GetAsyncKeyState 物理状态为准（事件位图可能因丢
+/// up 而失真，见 `phys_down`）；「其它键」仍用事件位图判断，但先经
+/// `reconcile_keys` 清掉残留位，避免丢失的 up 让组合键判定永久失真。
 fn kb_only_trigger_held(trigger: KbTrigger) -> (bool, bool) {
-    let trigger_down = is_key_down(trigger.vk);
+    reconcile_keys();
+    let trigger_down = canon_phys_down(trigger.vk_canonical());
     let others_down = any_key_down_except(trigger.vk);
     (trigger_down, !others_down)
 }
@@ -671,13 +729,34 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
                             }
                             return LRESULT(1);
                         }
-                        if msg == WM_MOUSEMOVE {
+                        // 自愈：鼠标/键盘触发键的抬起事件可能在 USB 挂起
+                        // 重置、安全桌面（UAC/锁屏）等场景丢失，事件驱动的
+                        // held 标志会永久残留 → 滚轮模式卡死吞掉所有移动。
+                        // 以物理按键状态为准：触发源实际已松开就清掉标志
+                        // （踩坑 四-25）。下一个鼠标事件到达即完成自愈。
+                        if state.scroll.mouse_held && !trigger_btn_phys_down(t) {
+                            state.scroll.mouse_held = false;
+                        }
+                        if state.scroll.kb_held
+                            && !state
+                                .scroll
+                                .kb_trigger
+                                .is_some_and(|kt| canon_phys_down(kt.vk_canonical()))
+                        {
+                            state.scroll.kb_held = false;
+                        }
+                        state.scroll.sync_active();
+                        if !state.scroll.active {
+                            if state.debug {
+                                eprintln!("[mss-debug] scroll mode OFF (phys heal)");
+                            }
+                        } else if msg == WM_MOUSEMOVE {
                             // 移动被吞：指针冻结。这里的 pt 不可用作位移
                             // （冻结光标后系统会补偿/钳制，见踩坑 四-17），
                             // Y 位移由 WM_INPUT → on_raw_input 提供。
                             return LRESULT(1);
                         }
-                        // 其余按键/滚轮消息照常放行
+                        // 其余按键/滚轮消息照常放行（含自愈退出后的本事件）
                     }
                 }
             }
@@ -759,6 +838,12 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) 
                     && state.scroll.enabled
                     && state.scroll.kb_trigger.is_some()
                 {
+                    // 对称自愈：鼠标触发键的抬起事件同样可能丢失（见
+                    // mouse_hook_proc），借键盘事件顺手校一次物理状态。
+                    if state.scroll.mouse_held && !trigger_btn_phys_down(state.scroll.trigger) {
+                        state.scroll.mouse_held = false;
+                        state.debug_log("scroll mouse_held healed (lost up)");
+                    }
                     // 记录 update_kb_active 之前是否已处于滚轮模式，
                     // 用于判断“非触发键按下”是否属于组合键中断。
                     let was_active = state.scroll.active;
